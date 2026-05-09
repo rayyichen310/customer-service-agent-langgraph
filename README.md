@@ -2,6 +2,12 @@
 
 This project implements the PDF specification with a `LangGraph + ReAct + MySQL` customer service agent.
 
+## Requirements
+
+- Docker Engine
+- Docker Compose plugin
+- Conda
+
 ## Features
 
 - Intent parsing for order tracking, profile lookup, refunds, complaints, and memory actions
@@ -22,7 +28,13 @@ cp .env.example .env
 
 ## MySQL Setup With Docker
 
-Start MySQL 8.4 with Docker Compose:
+Verify that the Compose plugin is installed:
+
+```bash
+docker compose version
+```
+
+Start MySQL 8.4:
 
 ```bash
 docker compose up -d
@@ -30,22 +42,10 @@ docker compose up -d
 
 The container loads `sql/schema.sql` and `sql/seed.sql` automatically on first startup.
 
-If your machine does not have the Docker Compose plugin, use:
-
-```bash
-bash scripts/start_mysql_docker.sh
-```
-
 To stop it later:
 
 ```bash
 docker compose down
-```
-
-Or, without Compose:
-
-```bash
-bash scripts/stop_mysql_docker.sh
 ```
 
 ## Run
@@ -99,5 +99,4 @@ pytest
 - `src/customer_service_agent/`: application code
 - `sql/`: schema and seed data
 - `compose.yaml`: Docker MySQL service
-- `scripts/`: Docker helper scripts for environments without Compose
 - `tests/`: functional tests for the scoring checklist

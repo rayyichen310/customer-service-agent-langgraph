@@ -5,6 +5,7 @@ dependencies:
   - python=3.11
   - pip
   - pip:
+      - cryptography>=45.0.0
       - fastapi>=0.115.0
       - langchain-core>=0.3.0
       - langchain-openai>=0.3.0
