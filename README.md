@@ -78,9 +78,7 @@ curl -X POST http://127.0.0.1:8000/chat \
 
 ## LLM Mode
 
-Default mode is `LLM_BACKEND=heuristic`, which works without API keys and is useful for grading and deterministic testing.
-
-To use OpenAI:
+Set a real OpenAI-compatible backend in `.env`:
 
 ```bash
 LLM_BACKEND=openai

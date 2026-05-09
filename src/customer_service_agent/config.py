@@ -1,5 +1,4 @@
 from functools import lru_cache
-from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -14,7 +13,7 @@ class Settings(BaseSettings):
 
     app_env: str = "development"
     log_level: str = "INFO"
-    llm_backend: Literal["heuristic", "openai"] = "heuristic"
+    llm_backend: str = "openai"
     openai_model: str = "gpt-4.1-mini"
     openai_api_key: str | None = None
     openai_base_url: str | None = None
@@ -26,4 +25,3 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
-
