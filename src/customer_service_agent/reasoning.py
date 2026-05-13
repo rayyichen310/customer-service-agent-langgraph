@@ -125,6 +125,9 @@ class ToolPlan:
     issue: str | None = None
     memory_key: str | None = None
     memory_value: str | None = None
+    pending_intent: str | None = None
+    pending_action: str | None = None
+    pending_order_id: int | None = None
     requires_follow_up: bool = False
     follow_up_question: str | None = None
     steps: list[str] = field(default_factory=list)
@@ -189,6 +192,8 @@ class StructuredChatReasoner(Reasoner):
             "or tool_results. "
             "Do not invent refund status, complaint IDs, delivery dates, customer history, "
             "or any action that is not present in the verified facts. "
+            "Do not make future handling promises unless response_constraints and verified "
+            "facts support them. "
             "Be concise, accurate, and personalized."
         )
         payload = {

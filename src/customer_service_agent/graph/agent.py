@@ -22,16 +22,26 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
             "active_customer_id": state.get("active_customer_id"),
             "active_order_id": state.get("active_order_id"),
             "issue": state.get("issue"),
+            "memory_key": state.get("memory_key"),
+            "memory_value": state.get("memory_value"),
+            "pending_intent": state.get("pending_intent"),
+            "pending_action": state.get("pending_action"),
+            "pending_order_id": state.get("pending_order_id"),
             "tool_results": state.get("tool_results", {}),
             "react_iterations": react_iterations,
             "max_react_iterations": state.get("max_react_iterations") or max_react_iterations,
         }
         plan = reasoner.plan(str(last_message), state_snapshot)
-        plan = _repair_plan_from_context(plan, str(last_message), state_snapshot)
+        plan = _apply_pending_intent_to_plan(plan, str(last_message), state_snapshot)
         next_customer_id = (
             plan.customer_id if plan.customer_id is not None else state.get("active_customer_id")
         )
         next_order_id = plan.order_id if plan.order_id is not None else state.get("active_order_id")
+        pending_intent = plan.pending_intent
+        pending_action = plan.pending_action
+        pending_order_id = (
+            plan.pending_order_id if plan.pending_order_id is not None else next_order_id
+        )
         return {
             "plan_steps": plan.steps,
             "reasoning": plan.reasoning,
@@ -40,6 +50,9 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
             "issue": plan.issue,
             "memory_key": plan.memory_key,
             "memory_value": plan.memory_value,
+            "pending_intent": pending_intent,
+            "pending_action": pending_action,
+            "pending_order_id": pending_order_id if pending_intent else None,
             "tool_calls": plan.tool_calls,
             "requested_actions": plan.requested_actions,
             "requires_follow_up": plan.requires_follow_up,
@@ -125,14 +138,7 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
         return {"long_term_memory": long_term_memory}
 
     def verifier_node(state: AgentState) -> dict[str, Any]:
-        if state.get("requires_follow_up"):
-            repaired = _repair_plan_from_context(None, _last_user_message(state), state)
-            if repaired.tool_calls:
-                return {
-                    "verifier_decision": "replan",
-                    "verification_errors": [],
-                    "tool_results": state.get("tool_results", {}),
-                }
+        if state.get("requires_follow_up") and not state.get("pending_intent"):
             return {
                 "verifier_decision": "ask_user",
                 "verification_errors": [
@@ -147,8 +153,16 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
         active_order_id = state.get("active_order_id")
         active_customer_id = state.get("active_customer_id")
         last_message = state["messages"][-1].content if state.get("messages") else ""
-        requested_mutation = _requested_order_mutation(str(last_message))
-        action_names = {action.get("name") for action in state.get("requested_actions", [])}
+        pending_intent = state.get("pending_intent")
+        pending_action = state.get("pending_action")
+        pending_order_id = state.get("pending_order_id")
+        requested_mutation = (
+            str(pending_intent)
+            if pending_intent in {"refund", "cancel"}
+            else _requested_order_mutation(str(last_message))
+        )
+        requested_actions = list(state.get("requested_actions", []))
+        action_names = {action.get("name") for action in requested_actions}
         called_order_lookup = any(
             call.get("name") == "order_lookup" for call in state.get("tool_calls", [])
         )
@@ -157,6 +171,7 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
             or requested_mutation
             or called_order_lookup
         )
+        resolved_reasoning: str | None = None
         can_replan = int(state.get("react_iterations") or 0) < int(
             state.get("max_react_iterations") or max_react_iterations
         )
@@ -224,18 +239,32 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
                     "verification_errors": errors,
                     "tool_results": tool_results,
                 }
-            if can_replan:
+            if order:
+                action = _resolved_pending_action(
+                    "refund",
+                    order_id=order["order_id"],
+                    customer_id=active_customer_id,
+                )
+                requested_actions.append(action)
+                action_names.add(action["name"])
+                pending_action = action["name"]
+                pending_order_id = order["order_id"]
+                resolved_reasoning = (
+                    "Resolved pending intent refund into request_refund after verified order observation."
+                )
+            elif can_replan:
                 return {
                     "verifier_decision": "replan",
                     "verification_errors": [],
                     "tool_results": tool_results,
                 }
-            errors.append("I could not complete the refund request within the reasoning step limit.")
-            return {
-                "verifier_decision": "blocked",
-                "verification_errors": errors,
-                "tool_results": tool_results,
-            }
+            else:
+                errors.append("I could not complete the refund request within the reasoning step limit.")
+                return {
+                    "verifier_decision": "blocked",
+                    "verification_errors": errors,
+                    "tool_results": tool_results,
+                }
 
         if requested_mutation == "cancel" and "request_cancel_order" not in action_names:
             if order and order["status"] in {"delivered", "refund_requested"}:
@@ -247,18 +276,63 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
                     "verification_errors": errors,
                     "tool_results": tool_results,
                 }
-            if can_replan:
+            if order:
+                action = _resolved_pending_action(
+                    "cancel",
+                    order_id=order["order_id"],
+                    customer_id=active_customer_id,
+                )
+                requested_actions.append(action)
+                action_names.add(action["name"])
+                pending_action = action["name"]
+                pending_order_id = order["order_id"]
+                resolved_reasoning = (
+                    "Resolved pending intent cancel into request_cancel_order after verified order observation."
+                )
+            elif can_replan:
                 return {
                     "verifier_decision": "replan",
                     "verification_errors": [],
                     "tool_results": tool_results,
                 }
-            errors.append("I could not complete the cancellation request within the reasoning step limit.")
-            return {
-                "verifier_decision": "blocked",
-                "verification_errors": errors,
-                "tool_results": tool_results,
-            }
+            else:
+                errors.append("I could not complete the cancellation request within the reasoning step limit.")
+                return {
+                    "verifier_decision": "blocked",
+                    "verification_errors": errors,
+                    "tool_results": tool_results,
+                }
+
+        if pending_intent == "complaint" and "request_log_complaint" not in action_names:
+            action = _resolved_pending_action(
+                "complaint",
+                order_id=_prefer_explicit_int(pending_order_id, active_order_id),
+                customer_id=active_customer_id,
+                issue=state.get("issue") or _complaint_issue(str(last_message)),
+            )
+            requested_actions.append(action)
+            action_names.add(action["name"])
+            pending_action = action["name"]
+            resolved_reasoning = "Resolved pending intent complaint into request_log_complaint."
+
+        if pending_intent == "memory_write" and "request_write_memory" not in action_names:
+            if not state.get("memory_key") or not state.get("memory_value"):
+                errors.append("I need a little more detail to help with that.")
+                return {
+                    "verifier_decision": "ask_user",
+                    "verification_errors": errors,
+                    "tool_results": tool_results,
+                }
+            action = _resolved_pending_action(
+                "memory_write",
+                customer_id=active_customer_id,
+                memory_key=state.get("memory_key"),
+                memory_value=state.get("memory_value"),
+            )
+            requested_actions.append(action)
+            action_names.add(action["name"])
+            pending_action = action["name"]
+            resolved_reasoning = "Resolved pending intent memory_write into request_write_memory."
 
         if "request_refund" in action_names and order:
             if order["status"] != "delivered":
@@ -285,11 +359,17 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
             errors.append("I could not store that preference without a valid customer ID.")
 
         decision = "blocked" if errors else "approved"
-        return {
+        result = {
             "verifier_decision": decision,
             "verification_errors": errors,
             "tool_results": tool_results,
+            "requested_actions": requested_actions,
+            "pending_action": pending_action,
+            "pending_order_id": pending_order_id,
         }
+        if resolved_reasoning:
+            result["reasoning"] = resolved_reasoning
+        return result
 
     def action_tool_node(state: AgentState) -> dict[str, Any]:
         tool_results = dict(state.get("tool_results", {}))
@@ -433,6 +513,8 @@ def _route_after_verifier(state: AgentState) -> str:
 def _needs_replan_after_read_tools(state: AgentState) -> bool:
     if state.get("requires_follow_up"):
         return False
+    if state.get("pending_intent") in {"refund", "cancel"}:
+        return False
     if int(state.get("react_iterations") or 0) >= int(
         state.get("max_react_iterations") or DEFAULT_MAX_REACT_ITERATIONS
     ):
@@ -450,108 +532,165 @@ def _needs_replan_after_read_tools(state: AgentState) -> bool:
     return called_order_lookup and bool(state.get("tool_results", {}).get("order"))
 
 
-def _repair_plan_from_context(
+def _apply_pending_intent_to_plan(
     plan,
     user_message: str,
     state_snapshot: dict[str, Any],
 ):
-    if plan is not None and plan.tool_calls:
+    if plan is None:
+        plan = _empty_tool_plan()
+
+    pending_intent = _pending_intent_from_context(plan, user_message)
+    if not pending_intent:
         return plan
 
-    active_customer_id = state_snapshot.get("active_customer_id")
     active_order_id = state_snapshot.get("active_order_id")
     tool_results = state_snapshot.get("tool_results", {})
     order = tool_results.get("order")
-    requested_mutation = _requested_order_mutation(user_message)
+    plan.pending_intent = pending_intent
+    plan.pending_action = _pending_action_name(pending_intent)
 
-    if requested_mutation in {"refund", "cancel"}:
-        order_id = _int_from_message(user_message) or active_order_id
+    if pending_intent in {"refund", "cancel"}:
+        order_id = _first_not_none(
+            _int_from_message(user_message),
+            plan.order_id,
+            state_snapshot.get("pending_order_id"),
+            active_order_id,
+        )
         if order:
             order_id = order["order_id"]
-            action_name = "request_refund" if requested_mutation == "refund" else "request_cancel_order"
-            action = {"name": action_name, "args": {"order_id": order_id}, "id": f"repaired-{action_name}"}
-            return _repaired_tool_plan(
-                action,
-                customer_id=active_customer_id,
-                order_id=order_id,
-                reasoning=f"Rule-based repair selected {action_name} from available order observation.",
-            )
-        if order_id is not None:
-            call = {"name": "order_lookup", "args": {"order_id": order_id}, "id": "repaired-order-lookup"}
-            return _repaired_tool_plan(
-                call,
-                customer_id=active_customer_id,
-                order_id=order_id,
-                reasoning="Rule-based repair selected order_lookup before an order mutation.",
-            )
-
-    if _requested_memory_write(user_message) and active_customer_id is not None:
-        key, value = _memory_preference(user_message)
-        if key and value:
-            action = {
-                "name": "request_write_memory",
-                "args": {"customer_id": active_customer_id, "key": key, "value": value},
-                "id": "repaired-memory-write",
+        plan.pending_order_id = order_id
+        if plan.order_id is None:
+            plan.order_id = order_id
+        if not plan.tool_calls and not order and order_id is not None:
+            call = {
+                "name": "order_lookup",
+                "args": {"order_id": order_id},
+                "id": "pending-order-lookup",
             }
-            return _repaired_tool_plan(
-                action,
-                customer_id=active_customer_id,
-                memory_key=key,
-                memory_value=value,
-                reasoning="Rule-based repair selected request_write_memory from the stated preference.",
+            plan.tool_calls = [call]
+            plan.requested_actions = []
+            plan.steps = [call["name"]]
+            plan.reasoning = (
+                f"Resolved pending intent {pending_intent} into order_lookup before transaction verification."
             )
-
-    if _requested_complaint(user_message) and active_customer_id is not None:
-        order_id = _int_from_message(user_message) or active_order_id
-        action = {
-            "name": "request_log_complaint",
-            "args": {
-                "customer_id": active_customer_id,
-                "order_id": order_id,
-                "issue": _complaint_issue(user_message),
-            },
-            "id": "repaired-complaint",
-        }
-        return _repaired_tool_plan(
-            action,
-            customer_id=active_customer_id,
-            order_id=order_id,
-            issue=action["args"]["issue"],
-            reasoning="Rule-based repair selected request_log_complaint from the complaint request.",
-        )
-
-    if plan is not None:
+        if not plan.tool_calls:
+            plan.requires_follow_up = False
+            plan.follow_up_question = None
         return plan
-    return _repaired_tool_plan(None)
+
+    if pending_intent == "memory_write":
+        key = plan.memory_key
+        value = plan.memory_value
+        if not key or not value:
+            key, value = _memory_preference(user_message)
+        plan.memory_key = key
+        plan.memory_value = value
+        plan.pending_order_id = None
+        if not plan.tool_calls:
+            plan.requires_follow_up = False
+            plan.follow_up_question = None
+            plan.reasoning = "Resolved pending intent memory_write for verifier continuation."
+        return plan
+
+    if pending_intent == "complaint":
+        order_id = _first_not_none(
+            _int_from_message(user_message),
+            plan.order_id,
+            state_snapshot.get("pending_order_id"),
+            active_order_id,
+        )
+        plan.pending_order_id = order_id
+        if plan.order_id is None:
+            plan.order_id = order_id
+        if not plan.issue:
+            plan.issue = _complaint_issue(user_message)
+        if not plan.tool_calls:
+            plan.requires_follow_up = False
+            plan.follow_up_question = None
+            plan.reasoning = "Resolved pending intent complaint for verifier continuation."
+        return plan
+
+    return plan
 
 
-def _repaired_tool_plan(
-    call: dict[str, Any] | None,
+def _empty_tool_plan():
+    from customer_service_agent.reasoning import ToolPlan
+
+    return ToolPlan(
+        requires_follow_up=True,
+        follow_up_question="I need a little more detail to help with that.",
+    )
+
+
+def _pending_intent_from_context(plan, user_message: str) -> str | None:
+    action_names = {action.get("name") for action in plan.requested_actions}
+    tool_names = {call.get("name") for call in plan.tool_calls}
+    requested_mutation = _requested_order_mutation(user_message)
+    if "request_refund" in action_names or requested_mutation == "refund":
+        return "refund"
+    if "request_cancel_order" in action_names or requested_mutation == "cancel":
+        return "cancel"
+    if "request_write_memory" in action_names or _requested_memory_write(user_message):
+        return "memory_write"
+    if (
+        "request_log_complaint" in action_names
+        or "request_log_complaint" in tool_names
+        or _requested_complaint(user_message)
+    ):
+        return "complaint"
+    return None
+
+
+def _pending_action_name(pending_intent: str | None) -> str | None:
+    return {
+        "refund": "request_refund",
+        "cancel": "request_cancel_order",
+        "complaint": "request_log_complaint",
+        "memory_write": "request_write_memory",
+    }.get(str(pending_intent))
+
+
+def _resolved_pending_action(
+    pending_intent: str,
     *,
-    customer_id: int | None = None,
     order_id: int | None = None,
+    customer_id: int | None = None,
     issue: str | None = None,
     memory_key: str | None = None,
     memory_value: str | None = None,
-    reasoning: str = "",
-):
-    from customer_service_agent.reasoning import ACTION_TOOL_NAMES, ToolPlan
-
-    tool_calls = [call] if call else []
-    requested_actions = [call] if call and call["name"] in ACTION_TOOL_NAMES else []
-    return ToolPlan(
-        tool_calls=tool_calls,
-        requested_actions=requested_actions,
-        customer_id=customer_id,
-        order_id=order_id,
-        issue=issue,
-        memory_key=memory_key,
-        memory_value=memory_value,
-        requires_follow_up=not tool_calls,
-        follow_up_question="I need a little more detail to help with that." if not tool_calls else None,
-        steps=[call["name"]] if call else [],
-        reasoning=reasoning,
-    )
+) -> dict[str, Any]:
+    if pending_intent == "refund":
+        return {
+            "name": "request_refund",
+            "args": {"order_id": order_id},
+            "id": "resolved-request_refund",
+        }
+    if pending_intent == "cancel":
+        return {
+            "name": "request_cancel_order",
+            "args": {"order_id": order_id},
+            "id": "resolved-request_cancel_order",
+        }
+    if pending_intent == "complaint":
+        return {
+            "name": "request_log_complaint",
+            "args": {
+                "customer_id": customer_id,
+                "order_id": order_id,
+                "issue": issue or "customer requested to file a complaint",
+            },
+            "id": "resolved-request_log_complaint",
+        }
+    return {
+        "name": "request_write_memory",
+        "args": {
+            "customer_id": customer_id,
+            "key": memory_key,
+            "value": memory_value,
+        },
+        "id": "resolved-request_write_memory",
+    }
 
 
 class CustomerServiceAgent:
@@ -637,6 +776,9 @@ def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, 
             "issue": update.get("issue"),
             "memory_key": update.get("memory_key"),
             "memory_value": update.get("memory_value"),
+            "pending_intent": update.get("pending_intent"),
+            "pending_action": update.get("pending_action"),
+            "pending_order_id": update.get("pending_order_id"),
             "tool_calls": update.get("tool_calls", []),
             "requested_actions": update.get("requested_actions", []),
             "requires_follow_up": update.get("requires_follow_up"),
@@ -663,6 +805,10 @@ def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, 
             "verifier_decision": update.get("verifier_decision"),
             "verification_errors": update.get("verification_errors", []),
             "tool_result_keys": list(tool_results.keys()),
+            "pending_action": update.get("pending_action"),
+            "pending_order_id": update.get("pending_order_id"),
+            "requested_actions": update.get("requested_actions", []),
+            "reasoning": update.get("reasoning"),
         }
     if node_name == "respond":
         return {
@@ -684,6 +830,13 @@ def _int_or_none(value: Any) -> int | None:
 def _prefer_explicit_int(value: Any, fallback: int | None) -> int | None:
     parsed = _int_or_none(value)
     return parsed if parsed is not None else fallback
+
+
+def _first_not_none(*values):
+    for value in values:
+        if value is not None:
+            return value
+    return None
 
 
 def _requested_order_mutation(message: str) -> str | None:
@@ -844,6 +997,8 @@ def _build_response_grounding(
         "Use only verified_facts and tool_results as ground truth.",
         "Do not invent refund status, complaint IDs, delivery dates, or customer history.",
         "Do not claim a mutation succeeded unless the matching verified fact is present.",
+        "Do not promise future handling, follow-up, investigation, escalation, or resolution "
+        "unless verified_facts or tool_results explicitly support that action or status.",
         "Use a warm customer-service tone while staying concise.",
     ]
     if verification_errors:
@@ -897,6 +1052,9 @@ def _new_turn_state(message: str, max_react_iterations: int) -> dict[str, Any]:
         "issue": None,
         "memory_key": None,
         "memory_value": None,
+        "pending_intent": None,
+        "pending_action": None,
+        "pending_order_id": None,
         "tool_calls": [],
         "requested_actions": [],
         "requires_follow_up": False,

@@ -153,7 +153,7 @@ def main() -> int:
                         "planner_iterations": planner_iterations(node_trace),
                         "tool_calls": planner_tool_call_names(node_trace),
                         "requested_actions": planner_requested_action_names(node_trace),
-                        "order_id": result.order_id,
+                        "order_id": scorecard_order_id(result.order_id, node_trace),
                         "customer_id": result.customer_id,
                         "tool_results": result.tool_results,
                         "verified_facts": result.verified_facts,
@@ -251,18 +251,44 @@ def planner_tool_call_names(node_trace: list[dict[str, Any]]) -> list[str]:
                 call.get("name", "")
                 for call in item.get("state", {}).get("tool_calls", [])
             )
+        if item.get("node") == "verifier" and _verifier_resolved_pending_intent(item):
+            names.extend(
+                action.get("name", "")
+                for action in item.get("state", {}).get("requested_actions", [])
+            )
     return names
 
 
 def planner_requested_action_names(node_trace: list[dict[str, Any]]) -> list[str]:
     names = []
     for item in node_trace:
-        if item.get("node") == "planner":
+        if item.get("node") == "planner" or (
+            item.get("node") == "verifier" and _verifier_resolved_pending_intent(item)
+        ):
             names.extend(
                 action.get("name", "")
                 for action in item.get("state", {}).get("requested_actions", [])
             )
     return names
+
+
+def scorecard_order_id(
+    fallback_order_id: int | None,
+    node_trace: list[dict[str, Any]],
+) -> int | None:
+    for item in reversed(node_trace):
+        state = item.get("state", {})
+        for action in reversed(state.get("requested_actions", [])):
+            order_id = _int_or_none(action.get("args", {}).get("order_id"))
+            if order_id is not None:
+                return order_id
+
+    for item in reversed(node_trace):
+        order_id = _int_or_none(item.get("state", {}).get("pending_order_id"))
+        if order_id is not None:
+            return order_id
+
+    return fallback_order_id
 
 
 def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
@@ -411,6 +437,20 @@ def _response_mentions(response: str, *terms: str) -> bool:
 def _response_says_already_requested(response: str) -> bool:
     normalized = response.lower()
     return "already requested" in normalized or "already submitted" in normalized
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _verifier_resolved_pending_intent(item: dict[str, Any]) -> bool:
+    return str(item.get("state", {}).get("reasoning") or "").startswith(
+        "Resolved pending intent"
+    )
 
 
 def _ordered_contains(values: list[str], expected: list[str]) -> bool:

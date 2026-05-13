@@ -319,15 +319,22 @@ def test_refund_uses_react_loop_before_action() -> None:
     response, updates = agent.trace("react-refund", "Refund order 7890 if delivered")
 
     planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
-    assert len(planner_updates) == 2
+    assert len(planner_updates) == 1
     assert [call["name"] for call in planner_updates[0]["tool_calls"]] == ["order_lookup"]
     assert planner_updates[0]["requested_actions"] == []
-    assert [action["name"] for action in planner_updates[1]["requested_actions"]] == ["request_refund"]
+    assert planner_updates[0]["pending_intent"] == "refund"
+    assert planner_updates[0]["pending_action"] == "request_refund"
+    assert planner_updates[0]["pending_order_id"] == 7890
 
     assert reasoner.plan_snapshots[0]["tool_results"] == {}
-    assert reasoner.plan_snapshots[1]["tool_results"]["order"]["status"] == "delivered"
 
     verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
+    assert [action["name"] for action in verifier_updates[-1]["requested_actions"]] == [
+        "request_refund"
+    ]
+    assert verifier_updates[-1]["reasoning"] == (
+        "Resolved pending intent refund into request_refund after verified order observation."
+    )
     assert verifier_updates[-1]["verifier_decision"] == "approved"
     assert response.verifier_decision == "approved"
     assert response.tool_results["refund"]["status"] == "refund_requested"
@@ -358,21 +365,27 @@ def test_verifier_replans_combined_read_and_refund_action() -> None:
     assert response.tool_results["refund"]["status"] == "refund_requested"
 
 
-def test_react_loop_stops_at_iteration_limit() -> None:
+def test_pending_intent_continues_transaction_after_observation() -> None:
     repository = build_repository()
     reasoner = LookupOnlyReasoner()
     agent = CustomerServiceAgent(reasoner, repository)
 
     response, updates = agent.trace("react-limit", "Refund order 7890 if delivered")
 
-    assert reasoner.plan_calls == 3
-    assert [update["node"] for update in updates].count("planner") == 3
-    assert response.verifier_decision == "blocked"
-    assert response.verification_errors == [
-        "I could not complete the refund request within the reasoning step limit."
+    verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
+
+    assert reasoner.plan_calls == 1
+    assert [update["node"] for update in updates].count("planner") == 1
+    assert [action["name"] for action in verifier_updates[-1]["requested_actions"]] == [
+        "request_refund"
     ]
-    assert "refund" not in response.tool_results
-    assert repository.get_order(7890)["status"] == "delivered"
+    assert verifier_updates[-1]["reasoning"] == (
+        "Resolved pending intent refund into request_refund after verified order observation."
+    )
+    assert response.verifier_decision == "approved"
+    assert response.verification_errors == []
+    assert response.tool_results["refund"]["status"] == "refund_requested"
+    assert repository.get_order(7890)["status"] == "refund_requested"
 
 
 def test_refund_owned_delivered_order_routes_success_through_responder() -> None:
@@ -394,14 +407,22 @@ def test_refund_owned_delivered_order_routes_success_through_responder() -> None
     assert repository.get_order(5678)["status"] == "refund_requested"
 
 
-def test_memory_write_repairs_missing_tool_call_and_routes_success_through_responder() -> None:
+def test_memory_write_resolves_pending_intent_and_routes_success_through_responder() -> None:
     repository = build_repository()
     agent = CustomerServiceAgent(NoToolMemoryWriteReasoner(), repository)
 
     response, updates = agent.trace("memory-write", "Remember I prefer refunds", customer_id=7)
 
     planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
-    assert planner_updates[0]["requested_actions"][0]["name"] == "request_write_memory"
+    verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
+    assert planner_updates[0]["pending_intent"] == "memory_write"
+    assert planner_updates[0]["pending_action"] == "request_write_memory"
+    assert [action["name"] for action in verifier_updates[-1]["requested_actions"]] == [
+        "request_write_memory"
+    ]
+    assert verifier_updates[-1]["reasoning"] == (
+        "Resolved pending intent memory_write into request_write_memory."
+    )
     assert response.verification_errors == []
     assert response.tool_results["memory_write"]["key"] == "refund_preference"
     assert response.verified_facts["memory_written"]["key"] == "refund_preference"
