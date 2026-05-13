@@ -72,6 +72,8 @@ class ChatResponse(BaseModel):
     order_id: int | None = None
     customer_id: int | None = None
     tool_results: dict[str, Any] = Field(default_factory=dict)
+    verified_facts: dict[str, Any] = Field(default_factory=dict)
+    response_constraints: list[str] = Field(default_factory=list)
     verifier_decision: str | None = None
     verification_errors: list[str] = Field(default_factory=list)
 
@@ -91,6 +93,8 @@ class AgentState(MessagesState):
     tool_results: dict[str, Any]
     verifier_decision: str | None
     verification_errors: list[str]
+    verified_facts: dict[str, Any]
+    response_constraints: list[str]
     react_iterations: int
     max_react_iterations: int
     long_term_memory: list[dict[str, Any]]

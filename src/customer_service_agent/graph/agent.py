@@ -47,6 +47,8 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
             "tool_results": state.get("tool_results", {}),
             "verifier_decision": None,
             "verification_errors": [],
+            "verified_facts": {},
+            "response_constraints": [],
             "react_iterations": react_iterations,
             "max_react_iterations": state.get("max_react_iterations") or max_react_iterations,
             "long_term_memory": [],
@@ -354,13 +356,18 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
 
     def response_node(state: AgentState) -> dict[str, Any]:
         last_message = state["messages"][-1].content if state.get("messages") else ""
+        verified_facts, response_constraints = _build_response_grounding(
+            state.get("tool_results", {}),
+            state.get("verification_errors", []),
+        )
         if state.get("verification_errors"):
             response = state["verification_errors"][0]
-            return {"messages": [("assistant", response)], "final_response": response}
-
-        template_response = _mutation_response(state.get("tool_results", {}))
-        if template_response:
-            return {"messages": [("assistant", template_response)], "final_response": template_response}
+            return {
+                "messages": [("assistant", response)],
+                "final_response": response,
+                "verified_facts": verified_facts,
+                "response_constraints": response_constraints,
+            }
 
         response = reasoner.respond(
             ResponseContext(
@@ -370,9 +377,16 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
                 long_term_memory=state.get("long_term_memory", []),
                 active_customer_id=state.get("active_customer_id"),
                 active_order_id=state.get("active_order_id"),
+                verified_facts=verified_facts,
+                response_constraints=response_constraints,
             )
         )
-        return {"messages": [("assistant", response)], "final_response": response}
+        return {
+            "messages": [("assistant", response)],
+            "final_response": response,
+            "verified_facts": verified_facts,
+            "response_constraints": response_constraints,
+        }
 
     graph = StateGraph(AgentState)
     graph.add_node("planner", planner_node)
@@ -566,6 +580,8 @@ class CustomerServiceAgent:
             order_id=result.get("active_order_id"),
             customer_id=result.get("active_customer_id"),
             tool_results=result.get("tool_results", {}),
+            verified_facts=result.get("verified_facts", {}),
+            response_constraints=result.get("response_constraints", []),
             verifier_decision=result.get("verifier_decision"),
             verification_errors=result.get("verification_errors", []),
         )
@@ -604,6 +620,8 @@ class CustomerServiceAgent:
                 order_id=result.get("active_order_id"),
                 customer_id=result.get("active_customer_id"),
                 tool_results=result.get("tool_results", {}),
+                verified_facts=result.get("verified_facts", {}),
+                response_constraints=result.get("response_constraints", []),
                 verifier_decision=result.get("verifier_decision"),
                 verification_errors=result.get("verification_errors", []),
             ),
@@ -647,7 +665,11 @@ def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, 
             "tool_result_keys": list(tool_results.keys()),
         }
     if node_name == "respond":
-        return {"final_response": update.get("final_response")}
+        return {
+            "final_response": update.get("final_response"),
+            "verified_facts": update.get("verified_facts", {}),
+            "response_constraints": update.get("response_constraints", []),
+        }
     return update
 
 
@@ -725,27 +747,146 @@ def _last_user_message(state: dict[str, Any]) -> str:
     return str(state["messages"][-1].content)
 
 
-def _mutation_response(tool_results: dict[str, Any]) -> str | None:
+def _build_response_grounding(
+    tool_results: dict[str, Any],
+    verification_errors: list[str],
+) -> tuple[dict[str, Any], list[str]]:
+    verified_facts: dict[str, Any] = {}
+
+    if verification_errors:
+        verified_facts["verification_errors"] = list(verification_errors)
+
+    order = tool_results.get("order")
+    if order:
+        verified_facts["order"] = {
+            "order_id": order.get("order_id"),
+            "customer_id": order.get("customer_id"),
+            "product_name": order.get("product_name"),
+            "status": order.get("status"),
+            "order_date": order.get("order_date"),
+            "delivery_date": order.get("delivery_date"),
+        }
+
+    customer = tool_results.get("customer")
+    if customer:
+        verified_facts["customer"] = {
+            "customer_id": customer.get("customer_id"),
+            "name": customer.get("name"),
+            "email": customer.get("email"),
+        }
+
     refund = tool_results.get("refund")
     if refund:
-        return f"Refund request submitted for order {refund['order_id']}."
+        verified_facts["refund_request"] = {
+            "order_id": refund.get("order_id"),
+            "status": refund.get("status"),
+            "created_this_turn": True,
+        }
 
     cancelled = tool_results.get("cancelled_order")
     if cancelled:
-        return f"Cancellation request submitted for order {cancelled['order_id']}."
+        verified_facts["cancellation_request"] = {
+            "order_id": cancelled.get("order_id"),
+            "status": cancelled.get("status"),
+            "created_this_turn": True,
+        }
 
     complaint = tool_results.get("complaint")
     if complaint:
-        order_id = complaint.get("order_id")
-        if order_id is not None:
-            return f"Complaint logged for order {order_id}."
-        return f"Complaint logged for customer {complaint['customer_id']}."
+        verified_facts["complaint_logged"] = {
+            "complaint_id": complaint.get("complaint_id"),
+            "customer_id": complaint.get("customer_id"),
+            "order_id": complaint.get("order_id"),
+            "issue": complaint.get("issue"),
+            "status": complaint.get("status"),
+        }
 
     memory_write = tool_results.get("memory_write")
     if memory_write:
-        return f"Memory updated: {memory_write['key']}."
+        verified_facts["memory_written"] = {
+            "customer_id": memory_write.get("customer_id"),
+            "key": memory_write.get("key"),
+            "value": memory_write.get("value"),
+        }
 
-    return None
+    memories = tool_results.get("memories")
+    if memories:
+        verified_facts["customer_memories"] = [
+            {
+                "customer_id": memory.get("customer_id"),
+                "key": memory.get("key"),
+                "value": memory.get("value"),
+            }
+            for memory in memories
+        ]
+
+    complaints = tool_results.get("complaints")
+    if complaints:
+        verified_facts["customer_complaints"] = [
+            {
+                "complaint_id": complaint.get("complaint_id"),
+                "order_id": complaint.get("order_id"),
+                "issue": complaint.get("issue"),
+                "status": complaint.get("status"),
+            }
+            for complaint in complaints
+        ]
+
+    issue_patterns = tool_results.get("issue_patterns")
+    if issue_patterns:
+        verified_facts["issue_patterns"] = {
+            "total_complaints": issue_patterns.get("total_complaints"),
+            "issue_counts": issue_patterns.get("issue_counts", {}),
+            "repeated_late_delivery": issue_patterns.get("repeated_late_delivery"),
+        }
+
+    constraints = [
+        "Use only verified_facts and tool_results as ground truth.",
+        "Do not invent refund status, complaint IDs, delivery dates, or customer history.",
+        "Do not claim a mutation succeeded unless the matching verified fact is present.",
+        "Use a warm customer-service tone while staying concise.",
+    ]
+    if verification_errors:
+        constraints.append(
+            "For verifier errors, communicate the first error without adding unsupported action claims."
+        )
+    if "refund_request" in verified_facts:
+        constraints.append(
+            "For the refund, only describe the request status shown in verified_facts."
+        )
+        if verified_facts["refund_request"].get("created_this_turn"):
+            constraints.append(
+                "For this current-turn refund result, say the request was submitted or requested; "
+                "do not say it was already requested or already submitted."
+            )
+    if "cancellation_request" in verified_facts:
+        constraints.append(
+            "For the cancellation, only describe the request status shown in verified_facts."
+        )
+        if verified_facts["cancellation_request"].get("created_this_turn"):
+            constraints.append(
+                "For this current-turn cancellation result, say the request was submitted or "
+                "requested; do not say it was already requested or already submitted."
+            )
+    if "complaint_logged" in verified_facts:
+        constraints.append(
+            "For the complaint, only mention the order, issue, status, or complaint ID if present in verified_facts."
+        )
+    if "issue_patterns" in verified_facts:
+        constraints.append(
+            "If repeated_late_delivery is true, mention the repeated late-delivery pattern; "
+            "otherwise do not mention repeated late-delivery history."
+        )
+    if "customer_memories" in verified_facts or "customer_complaints" in verified_facts:
+        constraints.append(
+            "Mention customer history only from customer_memories or customer_complaints."
+        )
+    if "memory_written" in verified_facts:
+        constraints.append(
+            "For memory writes, only confirm the saved key or value shown in verified_facts."
+        )
+
+    return verified_facts, constraints
 
 
 def _new_turn_state(message: str, max_react_iterations: int) -> dict[str, Any]:
@@ -762,6 +903,8 @@ def _new_turn_state(message: str, max_react_iterations: int) -> dict[str, Any]:
         "follow_up_question": None,
         "tool_results": {},
         "verification_errors": [],
+        "verified_facts": {},
+        "response_constraints": [],
         "verifier_decision": None,
         "react_iterations": 0,
         "max_react_iterations": max_react_iterations,

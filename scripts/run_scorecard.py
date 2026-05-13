@@ -156,6 +156,8 @@ def main() -> int:
                         "order_id": result.order_id,
                         "customer_id": result.customer_id,
                         "tool_results": result.tool_results,
+                        "verified_facts": result.verified_facts,
+                        "response_constraints": result.response_constraints,
                         "verification_errors": result.verification_errors,
                         "response": result.response,
                         "node_trace": node_trace,
@@ -267,6 +269,7 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
     failures: list[str] = []
     number = record["number"]
     tool_results = record.get("tool_results", {})
+    verified_facts = record.get("verified_facts", {})
     tool_calls = record.get("tool_calls", [])
     requested_actions = record.get("requested_actions", [])
     errors = record.get("verification_errors", [])
@@ -286,17 +289,67 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
     elif number == 4:
         require("order_lookup" in tool_calls, "refund should look up order first")
         require("request_refund" in requested_actions, "refund should request refund action")
-        require(tool_results.get("refund", {}).get("status") == "refund_requested", "order 5678 should be refund_requested")
-        require(response == "Refund request submitted for order 5678.", "refund response should use deterministic template")
+        require(
+            tool_results.get("refund", {}).get("status") == "refund_requested",
+            "order 5678 should be refund_requested",
+        )
+        require(
+            verified_facts.get("refund_request", {}).get("order_id") == 5678,
+            "refund response should be grounded to order 5678",
+        )
+        require(
+            verified_facts.get("refund_request", {}).get("status") == "refund_requested",
+            "refund response should be grounded to refund_requested",
+        )
+        require(
+            verified_facts.get("refund_request", {}).get("created_this_turn") is True,
+            "refund response should be grounded as a current-turn request",
+        )
+        require(
+            _response_mentions(response, "refund", "5678"),
+            "refund response should mention the grounded refund and order",
+        )
+        require(not _response_says_already_requested(response), "refund response should not say already requested")
         require(not errors, "refund should not ask for more info")
     elif number == 5:
         require("request_log_complaint" in requested_actions, "complaint should request complaint action")
-        require(tool_results.get("complaint", {}).get("order_id") == 2222, "complaint should be logged for order 2222")
-        require(response == "Complaint logged for order 2222.", "complaint response should use deterministic template")
+        require(
+            tool_results.get("complaint", {}).get("order_id") == 2222,
+            "complaint should be logged for order 2222",
+        )
+        require(
+            verified_facts.get("complaint_logged", {}).get("order_id") == 2222,
+            "complaint response should be grounded to order 2222",
+        )
+        require(
+            _response_mentions(response, "complaint", "2222"),
+            "complaint response should mention the grounded complaint and order",
+        )
     elif number == 6:
-        require(_ordered_contains(tool_calls, ["order_lookup", "request_refund"]), "conditional refund should look up before refund")
-        require(tool_results.get("refund", {}).get("status") == "refund_requested", "order 7890 should be refund_requested")
-        require(response == "Refund request submitted for order 7890.", "conditional refund response should use deterministic template")
+        require(
+            _ordered_contains(tool_calls, ["order_lookup", "request_refund"]),
+            "conditional refund should look up before refund",
+        )
+        require(
+            tool_results.get("refund", {}).get("status") == "refund_requested",
+            "order 7890 should be refund_requested",
+        )
+        require(
+            verified_facts.get("refund_request", {}).get("order_id") == 7890,
+            "conditional refund response should be grounded to order 7890",
+        )
+        require(
+            verified_facts.get("refund_request", {}).get("created_this_turn") is True,
+            "conditional refund response should be grounded as a current-turn request",
+        )
+        require(
+            _response_mentions(response, "refund", "7890"),
+            "conditional refund response should mention the grounded refund and order",
+        )
+        require(
+            not _response_says_already_requested(response),
+            "conditional refund response should not say already requested",
+        )
     elif number == 7:
         require("little more detail" not in response.lower(), "cancel should not ask for more info when active order is known")
         require(errors, "cancel should return a verifier policy error")
@@ -306,12 +359,32 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
         require("order" not in tool_results, "memory read should not include stale order result")
     elif number == 9:
         require("request_write_memory" in requested_actions, "memory write should request write action")
-        require(tool_results.get("memory_write", {}).get("key") == "refund_preference", "memory write should update refund_preference")
-        require(response == "Memory updated: refund_preference.", "memory write response should use deterministic template")
+        require(
+            tool_results.get("memory_write", {}).get("key") == "refund_preference",
+            "memory write should update refund_preference",
+        )
+        require(
+            verified_facts.get("memory_written", {}).get("key") == "refund_preference",
+            "memory write response should be grounded to refund_preference",
+        )
+        require(_response_mentions(response, "refund"), "memory write response should mention the grounded preference")
         require(not errors, "memory write should not ask for more info")
     elif number == 10:
         require("request_log_complaint" in requested_actions, "personalization should log complaint")
         require(tool_results.get("complaint", {}).get("issue"), "personalization should create complaint")
+        require(
+            verified_facts.get("complaint_logged", {}).get("issue"),
+            "personalization response should be grounded to the complaint issue",
+        )
+        if tool_results.get("issue_patterns"):
+            require(
+                verified_facts.get("issue_patterns", {}).get("repeated_late_delivery") is True,
+                "personalization should ground repeated late-delivery pattern",
+            )
+            require(
+                _response_mentions(response, "late"),
+                "personalized response should mention the grounded late-delivery issue",
+            )
     elif number == 11:
         require(errors == ["Order 0 does not exist."], "invalid refund should be blocked by verifier")
 
@@ -328,6 +401,16 @@ def failed_scorecard_records(records: list[dict[str, Any]]) -> list[dict[str, An
 
 def scorecard_exit_code(records: list[dict[str, Any]]) -> int:
     return 1 if failed_scorecard_records(records) else 0
+
+
+def _response_mentions(response: str, *terms: str) -> bool:
+    normalized = response.lower()
+    return all(term.lower() in normalized for term in terms)
+
+
+def _response_says_already_requested(response: str) -> bool:
+    normalized = response.lower()
+    return "already requested" in normalized or "already submitted" in normalized
 
 
 def _ordered_contains(values: list[str], expected: list[str]) -> bool:

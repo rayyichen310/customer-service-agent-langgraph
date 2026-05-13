@@ -331,7 +331,12 @@ def test_refund_uses_react_loop_before_action() -> None:
     assert verifier_updates[-1]["verifier_decision"] == "approved"
     assert response.verifier_decision == "approved"
     assert response.tool_results["refund"]["status"] == "refund_requested"
-    assert response.response == "Refund request submitted for order 7890."
+    assert response.verified_facts["refund_request"] == {
+        "order_id": 7890,
+        "status": "refund_requested",
+        "created_this_turn": True,
+    }
+    assert response.response == "The refund request was submitted for order 7890."
     assert repository.get_order(7890)["status"] == "refund_requested"
 
 
@@ -370,7 +375,7 @@ def test_react_loop_stops_at_iteration_limit() -> None:
     assert repository.get_order(7890)["status"] == "delivered"
 
 
-def test_refund_owned_delivered_order_succeeds_with_template_response() -> None:
+def test_refund_owned_delivered_order_routes_success_through_responder() -> None:
     repository = build_repository()
     agent = CustomerServiceAgent(RefundByMessageReasoner(), repository)
 
@@ -378,11 +383,18 @@ def test_refund_owned_delivered_order_succeeds_with_template_response() -> None:
 
     assert response.verification_errors == []
     assert response.tool_results["refund"]["status"] == "refund_requested"
-    assert response.response == "Refund request submitted for order 5678."
+    assert response.verified_facts["refund_request"] == {
+        "order_id": 5678,
+        "status": "refund_requested",
+        "created_this_turn": True,
+    }
+    assert "Do not invent refund status" in " ".join(response.response_constraints)
+    assert "already requested" in " ".join(response.response_constraints)
+    assert response.response == "LLM guessed refund response"
     assert repository.get_order(5678)["status"] == "refund_requested"
 
 
-def test_memory_write_repairs_missing_tool_call_and_uses_template_response() -> None:
+def test_memory_write_repairs_missing_tool_call_and_routes_success_through_responder() -> None:
     repository = build_repository()
     agent = CustomerServiceAgent(NoToolMemoryWriteReasoner(), repository)
 
@@ -392,11 +404,12 @@ def test_memory_write_repairs_missing_tool_call_and_uses_template_response() -> 
     assert planner_updates[0]["requested_actions"][0]["name"] == "request_write_memory"
     assert response.verification_errors == []
     assert response.tool_results["memory_write"]["key"] == "refund_preference"
-    assert response.response == "Memory updated: refund_preference."
+    assert response.verified_facts["memory_written"]["key"] == "refund_preference"
+    assert response.response == "LLM guessed memory response"
     assert len(repository.read_memories(7, key="refund_preference")) == 1
 
 
-def test_deterministic_mutation_response_templates() -> None:
+def test_successful_mutations_use_responder_instead_of_deterministic_templates() -> None:
     repository = build_repository()
 
     cancel_agent = CustomerServiceAgent(CancelAfterObservationReasoner(), repository)
@@ -428,12 +441,22 @@ def test_deterministic_mutation_response_templates() -> None:
         customer_id=7,
     )
 
-    assert cancel_response.response == "Cancellation request submitted for order 2468."
-    assert complaint_response.response == "Complaint logged for order 7890."
-    assert memory_response.response == "Memory updated: contact_preference."
-    assert "already" not in cancel_response.response.lower()
-    assert "already" not in complaint_response.response.lower()
-    assert "already" not in memory_response.response.lower()
+    assert cancel_response.verified_facts["cancellation_request"] == {
+        "order_id": 2468,
+        "status": "cancel_requested",
+        "created_this_turn": True,
+    }
+    assert complaint_response.verified_facts["complaint_logged"]["order_id"] == 7890
+    assert complaint_response.verified_facts["complaint_logged"]["issue"] == "package damaged"
+    assert memory_response.verified_facts["memory_written"]["key"] == "contact_preference"
+
+    assert cancel_response.response == "LLM guessed cancel response"
+    assert complaint_response.response == "LLM guessed mutation response"
+    assert memory_response.response == "LLM guessed mutation response"
+    assert cancel_response.response != "Cancellation request submitted for order 2468."
+    assert complaint_response.response != "Complaint logged for order 7890."
+    assert memory_response.response != "Memory updated: contact_preference."
+    assert "already requested" in " ".join(cancel_response.response_constraints)
 
 
 def test_profile_query_does_not_include_stale_order_result() -> None:

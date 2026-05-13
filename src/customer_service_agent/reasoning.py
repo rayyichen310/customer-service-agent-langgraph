@@ -112,6 +112,8 @@ class ResponseContext:
     long_term_memory: list[dict[str, Any]]
     active_customer_id: int | None
     active_order_id: int | None
+    verified_facts: dict[str, Any] = field(default_factory=dict)
+    response_constraints: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -179,11 +181,19 @@ class StructuredChatReasoner(Reasoner):
             return context.verification_errors[0]
 
         system_prompt = (
-            "You are a helpful customer service agent. "
-            "Use the tool outputs exactly as ground truth. "
+            "You are a warm customer service agent. "
+            "Use verified_facts and tool_results exactly as ground truth. "
+            "Follow response_constraints. "
+            "Only mention facts supported by verified_facts or tool_results. "
+            "Do not mention provided memory unless it is also represented in verified_facts "
+            "or tool_results. "
+            "Do not invent refund status, complaint IDs, delivery dates, customer history, "
+            "or any action that is not present in the verified facts. "
             "Be concise, accurate, and personalized."
         )
         payload = {
+            "verified_facts": context.verified_facts,
+            "response_constraints": context.response_constraints,
             "tool_results": context.tool_results,
             "long_term_memory": context.long_term_memory[:5],
             "active_customer_id": context.active_customer_id,
