@@ -101,7 +101,6 @@ PLANNER_TOOLS = [
 @dataclass
 class ResponseContext:
     user_message: str
-    intent: str | None
     tool_results: dict[str, Any]
     verification_errors: list[str]
     long_term_memory: list[dict[str, Any]]
@@ -113,7 +112,6 @@ class ResponseContext:
 class ToolPlan:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     requested_actions: list[dict[str, Any]] = field(default_factory=list)
-    intent: str = "general_support"
     customer_id: int | None = None
     order_id: int | None = None
     issue: str | None = None
@@ -137,12 +135,14 @@ class StructuredChatReasoner(Reasoner):
     def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
         system_prompt = (
             "You are a tool-calling planner for a customer service agent. "
-            "Call tools instead of answering directly. Use read tools to gather facts and action "
-            "request tools to describe requested mutations. Action request tools do not execute "
-            "until a verifier approves them. For refunds and cancellations, call order_lookup and "
-            "the matching action request tool in the same planner response. If the user asks for "
-            "a refund, you must call request_refund. If the user asks to cancel, you must call "
-            "request_cancel_order. For customer profile, call customer_profile. "
+            "Call tools instead of answering directly. Follow a Reason-Act-Observe loop: use read "
+            "tools to gather facts before requesting mutations, then use action request tools only "
+            "after the needed facts are available in State.observations. Action request tools do "
+            "not execute until a verifier approves them. For refunds and cancellations, if the "
+            "order status is unknown, call order_lookup first and do not request the mutation in "
+            "the same response. After State.observations contains the order status, call "
+            "request_refund for eligible refund requests or request_cancel_order for eligible "
+            "cancel requests. For customer profile, call customer_profile. "
             "For issue history, call read_customer_memory, list_customer_complaints, and "
             "summarize_issue_patterns. For complaints, call request_log_complaint; if details are "
             "missing, use issue='customer requested to file a complaint'. For memory writes, call "
@@ -154,6 +154,9 @@ class StructuredChatReasoner(Reasoner):
                 "active_customer_id": state_snapshot.get("active_customer_id"),
                 "active_order_id": state_snapshot.get("active_order_id"),
                 "known_issue": state_snapshot.get("issue"),
+                "observations": state_snapshot.get("tool_results", {}),
+                "react_iterations": state_snapshot.get("react_iterations"),
+                "max_react_iterations": state_snapshot.get("max_react_iterations"),
             }
         )
         response = self._planner.invoke(
@@ -175,7 +178,6 @@ class StructuredChatReasoner(Reasoner):
             "Be concise, accurate, and personalized."
         )
         payload = {
-            "intent": context.intent,
             "tool_results": context.tool_results,
             "long_term_memory": context.long_term_memory[:5],
             "active_customer_id": context.active_customer_id,
@@ -248,7 +250,6 @@ def _build_tool_plan(response: BaseMessage, state_snapshot: dict[str, Any]) -> T
         if args.get("order_id") is None and order_id is not None:
             args["order_id"] = order_id
 
-    intent = _derive_intent(tool_calls)
     issue = _first_str_arg(tool_calls, "issue")
     memory_key = _first_str_arg(tool_calls, "key")
     memory_value = _first_str_arg(tool_calls, "value")
@@ -260,7 +261,6 @@ def _build_tool_plan(response: BaseMessage, state_snapshot: dict[str, Any]) -> T
     return ToolPlan(
         tool_calls=tool_calls,
         requested_actions=requested_actions,
-        intent=intent,
         customer_id=customer_id,
         order_id=order_id,
         issue=issue,
@@ -301,25 +301,6 @@ def _first_str_arg(tool_calls: list[dict[str, Any]], key: str) -> str | None:
         if isinstance(value, str) and value:
             return value
     return None
-
-
-def _derive_intent(tool_calls: list[dict[str, Any]]) -> str:
-    names = [call["name"] for call in tool_calls]
-    if "request_refund" in names:
-        return "refund_request"
-    if "request_cancel_order" in names:
-        return "cancel_order"
-    if "request_log_complaint" in names:
-        return "complaint"
-    if "request_write_memory" in names:
-        return "memory_write"
-    if any(name in names for name in {"read_customer_memory", "list_customer_complaints", "summarize_issue_patterns"}):
-        return "memory_read"
-    if "customer_profile" in names:
-        return "customer_profile"
-    if "order_lookup" in names:
-        return "order_status"
-    return "general_support"
 
 
 def _message_text(message: BaseMessage) -> str:

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 from langgraph.graph import MessagesState
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -60,34 +60,6 @@ class CustomerMemory(Base):
     )
 
 
-Intent = Literal[
-    "order_status",
-    "customer_profile",
-    "refund_request",
-    "complaint",
-    "memory_read",
-    "memory_write",
-    "cancel_order",
-    "general_support",
-]
-
-
-class QueryPlan(BaseModel):
-    model_config = ConfigDict(use_enum_values=True)
-
-    intent: Intent
-    customer_id: int | None = None
-    order_id: int | None = None
-    product_name: str | None = None
-    issue: str | None = None
-    memory_key: str | None = None
-    memory_value: str | None = None
-    requires_follow_up: bool = False
-    follow_up_question: str | None = None
-    steps: list[str] = Field(default_factory=list)
-    reasoning: str = ""
-
-
 class ChatRequest(BaseModel):
     thread_id: str
     message: str
@@ -97,15 +69,14 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     thread_id: str
     response: str
-    intent: str
     order_id: int | None = None
     customer_id: int | None = None
     tool_results: dict[str, Any] = Field(default_factory=dict)
+    verifier_decision: str | None = None
     verification_errors: list[str] = Field(default_factory=list)
 
 
 class AgentState(MessagesState):
-    intent: str | None
     plan_steps: list[str]
     reasoning: str | None
     active_customer_id: int | None
@@ -118,7 +89,10 @@ class AgentState(MessagesState):
     requires_follow_up: bool
     follow_up_question: str | None
     tool_results: dict[str, Any]
+    verifier_decision: str | None
     verification_errors: list[str]
+    react_iterations: int
+    max_react_iterations: int
     long_term_memory: list[dict[str, Any]]
     final_response: str | None
 

@@ -10,13 +10,20 @@ from customer_service_agent.models import AgentState, ChatResponse
 from customer_service_agent.reasoning import ResponseContext
 
 
-def build_graph(reasoner, repository):
+DEFAULT_MAX_REACT_ITERATIONS = 3
+
+
+def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_REACT_ITERATIONS):
     def planner_node(state: AgentState) -> dict[str, Any]:
         last_message = state["messages"][-1].content if state.get("messages") else ""
+        react_iterations = int(state.get("react_iterations") or 0) + 1
         state_snapshot = {
             "active_customer_id": state.get("active_customer_id"),
             "active_order_id": state.get("active_order_id"),
             "issue": state.get("issue"),
+            "tool_results": state.get("tool_results", {}),
+            "react_iterations": react_iterations,
+            "max_react_iterations": state.get("max_react_iterations") or max_react_iterations,
         }
         plan = reasoner.plan(str(last_message), state_snapshot)
         next_customer_id = (
@@ -24,7 +31,6 @@ def build_graph(reasoner, repository):
         )
         next_order_id = plan.order_id if plan.order_id is not None else state.get("active_order_id")
         return {
-            "intent": plan.intent,
             "plan_steps": plan.steps,
             "reasoning": plan.reasoning,
             "active_customer_id": next_customer_id,
@@ -36,17 +42,20 @@ def build_graph(reasoner, repository):
             "requested_actions": plan.requested_actions,
             "requires_follow_up": plan.requires_follow_up,
             "follow_up_question": plan.follow_up_question,
-            "tool_results": {},
+            "tool_results": state.get("tool_results", {}),
+            "verifier_decision": None,
             "verification_errors": [],
+            "react_iterations": react_iterations,
+            "max_react_iterations": state.get("max_react_iterations") or max_react_iterations,
             "long_term_memory": [],
             "final_response": None,
         }
 
     def read_tool_node(state: AgentState) -> dict[str, Any]:
         if state.get("requires_follow_up"):
-            return {"tool_results": {}}
+            return {"tool_results": state.get("tool_results", {})}
 
-        tool_results: dict[str, Any] = {}
+        tool_results: dict[str, Any] = dict(state.get("tool_results", {}))
         active_customer_id = state.get("active_customer_id")
         active_order_id = state.get("active_order_id")
 
@@ -88,13 +97,6 @@ def build_graph(reasoner, repository):
                     active_customer_id = customer_id
                     tool_results["issue_patterns"] = repository.summarize_issue_patterns(customer_id)
 
-        if active_order_id is not None and "order" not in tool_results:
-            order = repository.get_order(active_order_id)
-            if order:
-                tool_results["order"] = order
-                if active_customer_id is None:
-                    active_customer_id = order["customer_id"]
-
         return {
             "tool_results": tool_results,
             "active_customer_id": active_customer_id,
@@ -120,25 +122,120 @@ def build_graph(reasoner, repository):
 
     def verifier_node(state: AgentState) -> dict[str, Any]:
         if state.get("requires_follow_up"):
-            return {"verification_errors": [state.get("follow_up_question")]}
+            return {
+                "verifier_decision": "ask_user",
+                "verification_errors": [
+                    state.get("follow_up_question")
+                    or "I need a little more detail to help with that."
+                ],
+            }
 
         errors: list[str] = []
-        intent = state.get("intent")
         tool_results = dict(state.get("tool_results", {}))
         order = tool_results.get("order")
         active_order_id = state.get("active_order_id")
         active_customer_id = state.get("active_customer_id")
+        last_message = state["messages"][-1].content if state.get("messages") else ""
+        requested_mutation = _requested_order_mutation(str(last_message))
         action_names = {action.get("name") for action in state.get("requested_actions", [])}
+        called_order_lookup = any(
+            call.get("name") == "order_lookup" for call in state.get("tool_calls", [])
+        )
+        needs_order = bool(
+            action_names & {"request_refund", "request_cancel_order"}
+            or requested_mutation
+            or called_order_lookup
+        )
+        can_replan = int(state.get("react_iterations") or 0) < int(
+            state.get("max_react_iterations") or max_react_iterations
+        )
 
-        if intent in {"order_status", "refund_request", "cancel_order"} and active_order_id is None:
+        if needs_order and active_order_id is None:
             errors.append("I need an order ID to continue.")
+            return {
+                "verifier_decision": "ask_user",
+                "verification_errors": errors,
+                "tool_results": tool_results,
+            }
 
-        if (
-            intent in {"order_status", "refund_request", "cancel_order"}
-            and active_order_id is not None
-            and not order
-        ):
+        if needs_order and active_order_id is not None and not order:
+            if not called_order_lookup and can_replan:
+                return {
+                    "verifier_decision": "replan",
+                    "verification_errors": [],
+                    "tool_results": tool_results,
+                }
             errors.append(f"Order {active_order_id} does not exist.")
+            return {
+                "verifier_decision": "blocked",
+                "verification_errors": errors,
+                "tool_results": tool_results,
+            }
+
+        combined_read_and_order_action = bool(
+            action_names & {"request_refund", "request_cancel_order"} and called_order_lookup
+        )
+        if combined_read_and_order_action:
+            if can_replan:
+                return {
+                    "verifier_decision": "replan",
+                    "verification_errors": [],
+                    "tool_results": tool_results,
+                }
+            errors.append(
+                "I could not complete the order action within the reasoning step limit."
+            )
+            return {
+                "verifier_decision": "blocked",
+                "verification_errors": errors,
+                "tool_results": tool_results,
+            }
+
+        if requested_mutation == "refund" and "request_refund" not in action_names:
+            if order and order["status"] != "delivered":
+                errors.append(
+                    f"Order {order['order_id']} is currently `{order['status']}` and is not eligible for refund yet."
+                )
+                return {
+                    "verifier_decision": "blocked",
+                    "verification_errors": errors,
+                    "tool_results": tool_results,
+                }
+            if can_replan:
+                return {
+                    "verifier_decision": "replan",
+                    "verification_errors": [],
+                    "tool_results": tool_results,
+                }
+            errors.append("I could not complete the refund request within the reasoning step limit.")
+            return {
+                "verifier_decision": "blocked",
+                "verification_errors": errors,
+                "tool_results": tool_results,
+            }
+
+        if requested_mutation == "cancel" and "request_cancel_order" not in action_names:
+            if order and order["status"] in {"delivered", "refund_requested"}:
+                errors.append(
+                    f"Order {order['order_id']} is currently `{order['status']}` and cannot be cancelled."
+                )
+                return {
+                    "verifier_decision": "blocked",
+                    "verification_errors": errors,
+                    "tool_results": tool_results,
+                }
+            if can_replan:
+                return {
+                    "verifier_decision": "replan",
+                    "verification_errors": [],
+                    "tool_results": tool_results,
+                }
+            errors.append("I could not complete the cancellation request within the reasoning step limit.")
+            return {
+                "verifier_decision": "blocked",
+                "verification_errors": errors,
+                "tool_results": tool_results,
+            }
 
         if "request_refund" in action_names and order:
             if order["status"] != "delivered":
@@ -152,7 +249,10 @@ def build_graph(reasoner, repository):
                     f"Order {order['order_id']} is currently `{order['status']}` and cannot be cancelled."
                 )
 
-        if intent == "customer_profile" and not tool_results.get("customer"):
+        called_customer_profile = any(
+            call.get("name") == "customer_profile" for call in state.get("tool_calls", [])
+        )
+        if called_customer_profile and not tool_results.get("customer"):
             errors.append("Customer profile was not found.")
 
         if "request_log_complaint" in action_names and not active_customer_id:
@@ -161,14 +261,16 @@ def build_graph(reasoner, repository):
         if "request_write_memory" in action_names and not active_customer_id:
             errors.append("I could not store that preference without a valid customer ID.")
 
+        decision = "blocked" if errors else "approved"
         return {
+            "verifier_decision": decision,
             "verification_errors": errors,
             "tool_results": tool_results,
         }
 
     def action_tool_node(state: AgentState) -> dict[str, Any]:
         tool_results = dict(state.get("tool_results", {}))
-        if state.get("verification_errors"):
+        if state.get("verifier_decision") != "approved":
             return {"tool_results": tool_results}
 
         active_customer_id = state.get("active_customer_id")
@@ -228,7 +330,6 @@ def build_graph(reasoner, repository):
         response = reasoner.respond(
             ResponseContext(
                 user_message=str(last_message),
-                intent=state.get("intent"),
                 tool_results=state.get("tool_results", {}),
                 verification_errors=state.get("verification_errors", []),
                 long_term_memory=state.get("long_term_memory", []),
@@ -248,13 +349,56 @@ def build_graph(reasoner, repository):
     graph.add_node("respond", response_node)
     graph.add_edge(START, "planner")
     graph.add_edge("planner", "read_tools")
-    graph.add_edge("read_tools", "memory")
+    graph.add_conditional_edges(
+        "read_tools",
+        _route_after_read_tools,
+        {"planner": "planner", "memory": "memory"},
+    )
     graph.add_edge("memory", "verifier")
-    graph.add_edge("verifier", "actions")
+    graph.add_conditional_edges(
+        "verifier",
+        _route_after_verifier,
+        {"planner": "planner", "actions": "actions", "respond": "respond"},
+    )
     graph.add_edge("actions", "memory_update")
     graph.add_edge("memory_update", "respond")
     graph.add_edge("respond", END)
     return graph.compile(checkpointer=InMemorySaver())
+
+
+def _route_after_read_tools(state: AgentState) -> str:
+    if _needs_replan_after_read_tools(state):
+        return "planner"
+    return "memory"
+
+
+def _route_after_verifier(state: AgentState) -> str:
+    decision = state.get("verifier_decision")
+    if decision == "replan":
+        return "planner"
+    if decision == "approved":
+        return "actions"
+    return "respond"
+
+
+def _needs_replan_after_read_tools(state: AgentState) -> bool:
+    if state.get("requires_follow_up"):
+        return False
+    if int(state.get("react_iterations") or 0) >= int(
+        state.get("max_react_iterations") or DEFAULT_MAX_REACT_ITERATIONS
+    ):
+        return False
+
+    last_message = state["messages"][-1].content if state.get("messages") else ""
+    if not _requested_order_mutation(str(last_message)):
+        return False
+    if state.get("requested_actions"):
+        return False
+
+    called_order_lookup = any(
+        call.get("name") == "order_lookup" for call in state.get("tool_calls", [])
+    )
+    return called_order_lookup and bool(state.get("tool_results", {}).get("order"))
 
 
 class CustomerServiceAgent:
@@ -269,7 +413,7 @@ class CustomerServiceAgent:
         message: str,
         customer_id: int | None = None,
     ) -> ChatResponse:
-        state: dict[str, Any] = {"messages": [HumanMessage(content=message)]}
+        state = _new_turn_state(message, DEFAULT_MAX_REACT_ITERATIONS)
         if customer_id is not None:
             state["active_customer_id"] = customer_id
 
@@ -280,10 +424,10 @@ class CustomerServiceAgent:
         return ChatResponse(
             thread_id=thread_id,
             response=result.get("final_response") or "",
-            intent=result.get("intent") or "general_support",
             order_id=result.get("active_order_id"),
             customer_id=result.get("active_customer_id"),
             tool_results=result.get("tool_results", {}),
+            verifier_decision=result.get("verifier_decision"),
             verification_errors=result.get("verification_errors", []),
         )
 
@@ -293,7 +437,7 @@ class CustomerServiceAgent:
         message: str,
         customer_id: int | None = None,
     ) -> tuple[ChatResponse, list[dict[str, Any]]]:
-        state: dict[str, Any] = {"messages": [HumanMessage(content=message)]}
+        state = _new_turn_state(message, DEFAULT_MAX_REACT_ITERATIONS)
         if customer_id is not None:
             state["active_customer_id"] = customer_id
 
@@ -318,10 +462,10 @@ class CustomerServiceAgent:
             ChatResponse(
                 thread_id=thread_id,
                 response=result.get("final_response") or "",
-                intent=result.get("intent") or "general_support",
                 order_id=result.get("active_order_id"),
                 customer_id=result.get("active_customer_id"),
                 tool_results=result.get("tool_results", {}),
+                verifier_decision=result.get("verifier_decision"),
                 verification_errors=result.get("verification_errors", []),
             ),
             updates,
@@ -331,7 +475,6 @@ class CustomerServiceAgent:
 def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, Any]:
     if node_name == "planner":
         return {
-            "intent": update.get("intent"),
             "active_customer_id": update.get("active_customer_id"),
             "active_order_id": update.get("active_order_id"),
             "issue": update.get("issue"),
@@ -360,6 +503,7 @@ def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, 
     if node_name == "verifier":
         tool_results = update.get("tool_results", {})
         return {
+            "verifier_decision": update.get("verifier_decision"),
             "verification_errors": update.get("verification_errors", []),
             "tool_result_keys": list(tool_results.keys()),
         }
@@ -379,3 +523,25 @@ def _int_or_none(value: Any) -> int | None:
 def _prefer_explicit_int(value: Any, fallback: int | None) -> int | None:
     parsed = _int_or_none(value)
     return parsed if parsed is not None else fallback
+
+
+def _requested_order_mutation(message: str) -> str | None:
+    normalized = message.lower()
+    if "refund" in normalized:
+        return "refund"
+    if "cancel" in normalized or "cancellation" in normalized:
+        return "cancel"
+    return None
+
+
+def _new_turn_state(message: str, max_react_iterations: int) -> dict[str, Any]:
+    return {
+        "messages": [HumanMessage(content=message)],
+        "tool_results": {},
+        "verification_errors": [],
+        "verifier_decision": None,
+        "react_iterations": 0,
+        "max_react_iterations": max_react_iterations,
+        "long_term_memory": [],
+        "final_response": None,
+    }
