@@ -139,26 +139,19 @@ def main() -> int:
                 f"[{case['number']}/{len(SCORECARD_CASES)}] {case['function']}: {case['query']}",
             )
             try:
-                if args.show_node_trace:
-                    result, node_trace = agent.trace(
-                        thread_id=args.thread_id,
-                        message=case["query"],
-                        customer_id=case["customer_id"],
-                    )
-                else:
-                    result = agent.invoke(
-                        thread_id=args.thread_id,
-                        message=case["query"],
-                        customer_id=case["customer_id"],
-                    )
-                    node_trace = []
+                result, node_trace = agent.trace(
+                    thread_id=args.thread_id,
+                    message=case["query"],
+                    customer_id=case["customer_id"],
+                )
                 records.append(
                     {
                         "number": case["number"],
                         "function": case["function"],
                         "query": case["query"],
                         "input_customer_id": case["customer_id"],
-                        "intent": result.intent,
+                        "tool_calls": planner_tool_call_names(node_trace),
+                        "requested_actions": planner_requested_action_names(node_trace),
                         "order_id": result.order_id,
                         "customer_id": result.customer_id,
                         "tool_results": result.tool_results,
@@ -169,7 +162,10 @@ def main() -> int:
                 )
                 if args.show_node_trace:
                     log_node_trace(args.quiet, node_trace)
-                log_progress(args.quiet, f"  intent: {result.intent}")
+                log_progress(args.quiet, f"  tool_calls: {planner_tool_call_names(node_trace)}")
+                actions = planner_requested_action_names(node_trace)
+                if actions:
+                    log_progress(args.quiet, f"  requested_actions: {actions}")
                 if result.verification_errors:
                     log_progress(args.quiet, f"  verifier: {result.verification_errors[0]}")
                 log_progress(args.quiet, f"  response: {result.response}")
@@ -198,6 +194,23 @@ def log_progress(quiet: bool, message: str) -> None:
         print(message, file=sys.stderr, flush=True)
 
 
+def planner_tool_call_names(node_trace: list[dict[str, Any]]) -> list[str]:
+    for item in node_trace:
+        if item.get("node") == "planner":
+            return [call.get("name", "") for call in item.get("state", {}).get("tool_calls", [])]
+    return []
+
+
+def planner_requested_action_names(node_trace: list[dict[str, Any]]) -> list[str]:
+    for item in node_trace:
+        if item.get("node") == "planner":
+            return [
+                action.get("name", "")
+                for action in item.get("state", {}).get("requested_actions", [])
+            ]
+    return []
+
+
 def log_node_trace(quiet: bool, node_trace: list[dict[str, Any]]) -> None:
     if quiet:
         return
@@ -207,8 +220,8 @@ def log_node_trace(quiet: bool, node_trace: list[dict[str, Any]]) -> None:
         print(f"  node: {node}", file=sys.stderr, flush=True)
         if node == "planner":
             print(
-                f"    intent={state.get('intent')} customer={state.get('active_customer_id')} "
-                f"order={state.get('active_order_id')} follow_up={state.get('requires_follow_up')}",
+                f"    customer={state.get('active_customer_id')} order={state.get('active_order_id')} "
+                f"follow_up={state.get('requires_follow_up')}",
                 file=sys.stderr,
                 flush=True,
             )

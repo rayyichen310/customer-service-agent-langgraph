@@ -10,7 +10,7 @@ This project implements the PDF specification with a `LangGraph + ReAct + MySQL`
 
 ## Features
 
-- Intent parsing for order tracking, profile lookup, refunds, complaints, and memory actions
+- Tool-call planning for order tracking, profile lookup, refunds, complaints, and memory actions
 - ReAct-style workflow with `planner -> tools -> memory -> verifier -> response`
 - Short-term memory through LangGraph checkpointer
 - Long-term memory through MySQL tables: `customer_memory` and `complaints`
