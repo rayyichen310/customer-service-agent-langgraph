@@ -126,6 +126,20 @@ To show how each LangGraph node updates state during the run:
 conda run --no-capture-output -n customer-service-agent python scripts/run_scorecard.py --reset-demo-data --show-node-trace
 ```
 
+To rerun only selected scorecard cases:
+
+```bash
+conda run --no-capture-output -n customer-service-agent python scripts/run_scorecard.py --reset-demo-data --case 4 --case 5 --show-node-trace
+```
+
+The runtime graph uses model-generated tool calls with guarded write actions:
+
+```text
+planner -> read_tools -> memory -> verifier -> actions -> memory_update -> respond
+```
+
+The planner calls tools such as `order_lookup` and action requests such as `request_refund`. Read tools run first, the verifier checks database truth and business rules, and only approved action requests mutate MySQL.
+
 ## Project Structure
 
 - `src/customer_service_agent/`: application code

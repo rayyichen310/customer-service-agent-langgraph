@@ -111,7 +111,15 @@ def main() -> int:
     parser.add_argument(
         "--show-node-trace",
         action="store_true",
-        help="Print planner/tools/memory/verifier/respond updates for each query.",
+        help="Print planner/read_tools/memory/verifier/actions/respond updates for each query.",
+    )
+    parser.add_argument(
+        "--case",
+        action="append",
+        type=int,
+        choices=range(1, len(SCORECARD_CASES) + 1),
+        metavar="N",
+        help="Only run one scorecard case number. Can be passed multiple times.",
     )
     args = parser.parse_args()
 
@@ -122,9 +130,10 @@ def main() -> int:
     log_progress(args.quiet, "Building agent...")
     agent = build_agent()
     records: list[dict[str, Any]] = []
+    cases = [case for case in SCORECARD_CASES if not args.case or case["number"] in args.case]
 
     try:
-        for case in SCORECARD_CASES:
+        for case in cases:
             log_progress(
                 args.quiet,
                 f"[{case['number']}/{len(SCORECARD_CASES)}] {case['function']}: {case['query']}",
@@ -203,16 +212,19 @@ def log_node_trace(quiet: bool, node_trace: list[dict[str, Any]]) -> None:
                 file=sys.stderr,
                 flush=True,
             )
+            if state.get("tool_calls"):
+                calls = [call.get("name") for call in state["tool_calls"]]
+                print(f"    tool_calls={calls}", file=sys.stderr, flush=True)
             if state.get("plan_steps"):
                 print(f"    steps={state['plan_steps']}", file=sys.stderr, flush=True)
-        elif node == "tools":
+        elif node in {"read_tools", "actions"}:
             print(
                 f"    tools={state.get('tool_result_keys', [])} "
                 f"customer={state.get('active_customer_id')} order={state.get('active_order_id')}",
                 file=sys.stderr,
                 flush=True,
             )
-        elif node == "memory":
+        elif node in {"memory", "memory_update"}:
             print(
                 f"    long_term_memory_count={state.get('long_term_memory_count', 0)}",
                 file=sys.stderr,

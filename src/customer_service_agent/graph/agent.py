@@ -32,6 +32,8 @@ def build_graph(reasoner, repository):
             "issue": plan.issue or state.get("issue"),
             "memory_key": plan.memory_key,
             "memory_value": plan.memory_value,
+            "tool_calls": plan.tool_calls,
+            "requested_actions": plan.requested_actions,
             "requires_follow_up": plan.requires_follow_up,
             "follow_up_question": plan.follow_up_question,
             "tool_results": {},
@@ -40,63 +42,58 @@ def build_graph(reasoner, repository):
             "final_response": None,
         }
 
-    def tool_node(state: AgentState) -> dict[str, Any]:
+    def read_tool_node(state: AgentState) -> dict[str, Any]:
         if state.get("requires_follow_up"):
             return {"tool_results": {}}
 
-        intent = state.get("intent")
         tool_results: dict[str, Any] = {}
         active_customer_id = state.get("active_customer_id")
         active_order_id = state.get("active_order_id")
 
-        if active_order_id is not None:
+        for tool_call in state.get("tool_calls", []):
+            name = tool_call.get("name")
+            args = tool_call.get("args", {})
+
+            if name == "order_lookup":
+                order_id = _prefer_explicit_int(args.get("order_id"), active_order_id)
+                if order_id is not None:
+                    active_order_id = order_id
+                    order = repository.get_order(order_id)
+                    if order:
+                        tool_results["order"] = order
+                        if active_customer_id is None:
+                            active_customer_id = order["customer_id"]
+
+            elif name == "customer_profile":
+                customer_id = _prefer_explicit_int(args.get("customer_id"), active_customer_id)
+                if customer_id is not None:
+                    active_customer_id = customer_id
+                    tool_results["customer"] = repository.get_customer(customer_id)
+
+            elif name == "read_customer_memory":
+                customer_id = _prefer_explicit_int(args.get("customer_id"), active_customer_id)
+                if customer_id is not None:
+                    active_customer_id = customer_id
+                    tool_results["memories"] = repository.read_memories(customer_id)
+
+            elif name == "list_customer_complaints":
+                customer_id = _prefer_explicit_int(args.get("customer_id"), active_customer_id)
+                if customer_id is not None:
+                    active_customer_id = customer_id
+                    tool_results["complaints"] = repository.list_complaints(customer_id)
+
+            elif name == "summarize_issue_patterns":
+                customer_id = _prefer_explicit_int(args.get("customer_id"), active_customer_id)
+                if customer_id is not None:
+                    active_customer_id = customer_id
+                    tool_results["issue_patterns"] = repository.summarize_issue_patterns(customer_id)
+
+        if active_order_id is not None and "order" not in tool_results:
             order = repository.get_order(active_order_id)
             if order:
                 tool_results["order"] = order
                 if active_customer_id is None:
                     active_customer_id = order["customer_id"]
-
-        if intent == "customer_profile" and active_customer_id:
-            tool_results["customer"] = repository.get_customer(active_customer_id)
-
-        elif intent == "refund_request":
-            order = tool_results.get("order")
-            if order and order["status"] == "delivered":
-                tool_results["refund"] = repository.request_refund(order["order_id"])
-
-        elif intent == "cancel_order":
-            order = tool_results.get("order")
-            if order and order["status"] not in {"delivered", "refund_requested"}:
-                tool_results["cancelled_order"] = repository.cancel_order(order["order_id"])
-
-        elif intent == "complaint":
-            issue = state.get("issue") or "Unspecified issue"
-            if active_order_id is not None and "order" not in tool_results:
-                tool_results["order"] = repository.get_order(active_order_id)
-                if tool_results["order"]:
-                    if active_customer_id is None:
-                        active_customer_id = tool_results["order"]["customer_id"]
-            if active_customer_id:
-                complaint = repository.log_complaint(
-                    customer_id=active_customer_id,
-                    order_id=active_order_id,
-                    issue=issue,
-                )
-                tool_results["complaint"] = complaint
-
-        elif intent == "memory_write":
-            if active_customer_id and state.get("memory_key") and state.get("memory_value"):
-                tool_results["memory_write"] = repository.write_memory(
-                    customer_id=active_customer_id,
-                    key=state["memory_key"],
-                    value=state["memory_value"],
-                )
-
-        elif intent in {"memory_read", "general_support"}:
-            if active_customer_id:
-                tool_results["memories"] = repository.read_memories(active_customer_id)
-                tool_results["complaints"] = repository.list_complaints(active_customer_id)
-                tool_results["issue_patterns"] = repository.summarize_issue_patterns(active_customer_id)
 
         return {
             "tool_results": tool_results,
@@ -117,11 +114,6 @@ def build_graph(reasoner, repository):
 
         complaint = state.get("tool_results", {}).get("complaint")
         if complaint:
-            repository.write_memory(
-                active_customer_id,
-                "issue_history",
-                complaint["issue"],
-            )
             long_term_memory = repository.read_memories(active_customer_id)[:5]
 
         return {"long_term_memory": long_term_memory}
@@ -135,6 +127,8 @@ def build_graph(reasoner, repository):
         tool_results = dict(state.get("tool_results", {}))
         order = tool_results.get("order")
         active_order_id = state.get("active_order_id")
+        active_customer_id = state.get("active_customer_id")
+        action_names = {action.get("name") for action in state.get("requested_actions", [])}
 
         if intent in {"order_status", "refund_request", "cancel_order"} and active_order_id is None:
             errors.append("I need an order ID to continue.")
@@ -146,35 +140,88 @@ def build_graph(reasoner, repository):
         ):
             errors.append(f"Order {active_order_id} does not exist.")
 
-        if intent == "refund_request" and order:
+        if "request_refund" in action_names and order:
             if order["status"] != "delivered":
                 errors.append(
                     f"Order {order['order_id']} is currently `{order['status']}` and is not eligible for refund yet."
                 )
-            elif not tool_results.get("refund"):
-                errors.append(f"I could not initiate a refund for order {order['order_id']}.")
 
-        if intent == "cancel_order" and order:
+        if "request_cancel_order" in action_names and order:
             if order["status"] in {"delivered", "refund_requested"}:
                 errors.append(
                     f"Order {order['order_id']} is currently `{order['status']}` and cannot be cancelled."
                 )
-            elif not tool_results.get("cancelled_order"):
-                errors.append(f"I could not cancel order {order['order_id']}.")
 
         if intent == "customer_profile" and not tool_results.get("customer"):
             errors.append("Customer profile was not found.")
 
-        if intent == "complaint" and not tool_results.get("complaint"):
+        if "request_log_complaint" in action_names and not active_customer_id:
             errors.append("I could not log the complaint without a valid customer or order.")
 
-        if intent == "memory_write" and not tool_results.get("memory_write"):
+        if "request_write_memory" in action_names and not active_customer_id:
             errors.append("I could not store that preference without a valid customer ID.")
 
         return {
             "verification_errors": errors,
             "tool_results": tool_results,
         }
+
+    def action_tool_node(state: AgentState) -> dict[str, Any]:
+        tool_results = dict(state.get("tool_results", {}))
+        if state.get("verification_errors"):
+            return {"tool_results": tool_results}
+
+        active_customer_id = state.get("active_customer_id")
+        active_order_id = state.get("active_order_id")
+
+        for action in state.get("requested_actions", []):
+            name = action.get("name")
+            args = action.get("args", {})
+
+            if name == "request_refund":
+                order_id = _prefer_explicit_int(args.get("order_id"), active_order_id)
+                if order_id is not None:
+                    tool_results["refund"] = repository.request_refund(order_id)
+
+            elif name == "request_cancel_order":
+                order_id = _prefer_explicit_int(args.get("order_id"), active_order_id)
+                if order_id is not None:
+                    tool_results["cancelled_order"] = repository.cancel_order(order_id)
+
+            elif name == "request_log_complaint":
+                customer_id = _prefer_explicit_int(args.get("customer_id"), active_customer_id)
+                order_id = _prefer_explicit_int(args.get("order_id"), active_order_id)
+                issue = args.get("issue") or state.get("issue") or "customer requested to file a complaint"
+                if customer_id is not None:
+                    tool_results["complaint"] = repository.log_complaint(
+                        customer_id=customer_id,
+                        order_id=order_id,
+                        issue=str(issue),
+                    )
+
+            elif name == "request_write_memory":
+                customer_id = _prefer_explicit_int(args.get("customer_id"), active_customer_id)
+                key = args.get("key") or state.get("memory_key")
+                value = args.get("value") or state.get("memory_value")
+                if customer_id is not None and key and value:
+                    tool_results["memory_write"] = repository.write_memory(
+                        customer_id=customer_id,
+                        key=str(key),
+                        value=str(value),
+                    )
+
+        return {"tool_results": tool_results}
+
+    def memory_update_node(state: AgentState) -> dict[str, Any]:
+        active_customer_id = state.get("active_customer_id")
+        if not active_customer_id:
+            return {"long_term_memory": state.get("long_term_memory", [])}
+
+        complaint = state.get("tool_results", {}).get("complaint")
+        if complaint:
+            repository.write_memory(active_customer_id, "issue_history", complaint["issue"])
+
+        return {"long_term_memory": repository.read_memories(active_customer_id)[:5]}
 
     def response_node(state: AgentState) -> dict[str, Any]:
         last_message = state["messages"][-1].content if state.get("messages") else ""
@@ -193,15 +240,19 @@ def build_graph(reasoner, repository):
 
     graph = StateGraph(AgentState)
     graph.add_node("planner", planner_node)
-    graph.add_node("tools", tool_node)
+    graph.add_node("read_tools", read_tool_node)
     graph.add_node("memory", memory_node)
     graph.add_node("verifier", verifier_node)
+    graph.add_node("actions", action_tool_node)
+    graph.add_node("memory_update", memory_update_node)
     graph.add_node("respond", response_node)
     graph.add_edge(START, "planner")
-    graph.add_edge("planner", "tools")
-    graph.add_edge("tools", "memory")
+    graph.add_edge("planner", "read_tools")
+    graph.add_edge("read_tools", "memory")
     graph.add_edge("memory", "verifier")
-    graph.add_edge("verifier", "respond")
+    graph.add_edge("verifier", "actions")
+    graph.add_edge("actions", "memory_update")
+    graph.add_edge("memory_update", "respond")
     graph.add_edge("respond", END)
     return graph.compile(checkpointer=InMemorySaver())
 
@@ -286,11 +337,13 @@ def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, 
             "issue": update.get("issue"),
             "memory_key": update.get("memory_key"),
             "memory_value": update.get("memory_value"),
+            "tool_calls": update.get("tool_calls", []),
+            "requested_actions": update.get("requested_actions", []),
             "requires_follow_up": update.get("requires_follow_up"),
             "plan_steps": update.get("plan_steps", []),
             "reasoning": update.get("reasoning"),
         }
-    if node_name == "tools":
+    if node_name in {"read_tools", "actions"}:
         tool_results = update.get("tool_results", {})
         return {
             "active_customer_id": update.get("active_customer_id"),
@@ -298,7 +351,7 @@ def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, 
             "tool_result_keys": list(tool_results.keys()),
             "tool_results": tool_results,
         }
-    if node_name == "memory":
+    if node_name in {"memory", "memory_update"}:
         long_term_memory = update.get("long_term_memory", [])
         return {
             "long_term_memory_count": len(long_term_memory),
@@ -313,3 +366,16 @@ def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, 
     if node_name == "respond":
         return {"final_response": update.get("final_response")}
     return update
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _prefer_explicit_int(value: Any, fallback: int | None) -> int | None:
+    parsed = _int_or_none(value)
+    return parsed if parsed is not None else fallback

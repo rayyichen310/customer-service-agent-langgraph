@@ -113,6 +113,8 @@ class AgentState(MessagesState):
     issue: str | None
     memory_key: str | None
     memory_value: str | None
+    tool_calls: list[dict[str, Any]]
+    requested_actions: list[dict[str, Any]]
     requires_follow_up: bool
     follow_up_question: str | None
     tool_results: dict[str, Any]
@@ -123,4 +125,3 @@ class AgentState(MessagesState):
 
 OrderRecord = Annotated[dict[str, Any], "OrderRecord"]
 CustomerRecord = Annotated[dict[str, Any], "CustomerRecord"]
-

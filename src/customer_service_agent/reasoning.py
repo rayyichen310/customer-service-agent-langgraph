@@ -1,15 +1,101 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
 from customer_service_agent.config import Settings
-from customer_service_agent.models import QueryPlan
+
+
+READ_TOOL_NAMES = {
+    "order_lookup",
+    "customer_profile",
+    "read_customer_memory",
+    "list_customer_complaints",
+    "summarize_issue_patterns",
+}
+ACTION_TOOL_NAMES = {
+    "request_refund",
+    "request_cancel_order",
+    "request_log_complaint",
+    "request_write_memory",
+}
+
+
+@tool("order_lookup")
+def order_lookup(order_id: int) -> str:
+    """Read order details by order ID."""
+    return "schema only"
+
+
+@tool("customer_profile")
+def customer_profile(customer_id: int) -> str:
+    """Read customer profile details by customer ID."""
+    return "schema only"
+
+
+@tool("read_customer_memory")
+def read_customer_memory(customer_id: int) -> str:
+    """Read long-term customer memory records."""
+    return "schema only"
+
+
+@tool("list_customer_complaints")
+def list_customer_complaints(customer_id: int) -> str:
+    """Read previous customer complaints."""
+    return "schema only"
+
+
+@tool("summarize_issue_patterns")
+def summarize_issue_patterns(customer_id: int) -> str:
+    """Read summarized complaint issue patterns for a customer."""
+    return "schema only"
+
+
+@tool("request_refund")
+def request_refund(order_id: int) -> str:
+    """Request a refund action for an order. Execution is gated by verifier policy."""
+    return "schema only"
+
+
+@tool("request_cancel_order")
+def request_cancel_order(order_id: int) -> str:
+    """Request a cancel action for an order. Execution is gated by verifier policy."""
+    return "schema only"
+
+
+@tool("request_log_complaint")
+def request_log_complaint(
+    customer_id: int | None = None,
+    order_id: int | None = None,
+    issue: str = "customer requested to file a complaint",
+) -> str:
+    """Request logging a customer complaint. Execution is gated by verifier policy."""
+    return "schema only"
+
+
+@tool("request_write_memory")
+def request_write_memory(customer_id: int | None = None, key: str = "", value: str = "") -> str:
+    """Request writing a long-term customer memory preference or note."""
+    return "schema only"
+
+
+PLANNER_TOOLS = [
+    order_lookup,
+    customer_profile,
+    read_customer_memory,
+    list_customer_complaints,
+    summarize_issue_patterns,
+    request_refund,
+    request_cancel_order,
+    request_log_complaint,
+    request_write_memory,
+]
 
 
 @dataclass
@@ -23,8 +109,24 @@ class ResponseContext:
     active_order_id: int | None
 
 
+@dataclass
+class ToolPlan:
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    requested_actions: list[dict[str, Any]] = field(default_factory=list)
+    intent: str = "general_support"
+    customer_id: int | None = None
+    order_id: int | None = None
+    issue: str | None = None
+    memory_key: str | None = None
+    memory_value: str | None = None
+    requires_follow_up: bool = False
+    follow_up_question: str | None = None
+    steps: list[str] = field(default_factory=list)
+    reasoning: str = ""
+
+
 class Reasoner:
-    def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> QueryPlan:
+    def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
         raise NotImplementedError
 
     def respond(self, context: ResponseContext) -> str:
@@ -32,15 +134,20 @@ class Reasoner:
 
 
 class StructuredChatReasoner(Reasoner):
-    def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> QueryPlan:
+    def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
         system_prompt = (
-            "You are planning actions for a customer service agent. "
-            "Return a structured plan only. Supported intents: order_status, customer_profile, "
-            "refund_request, complaint, memory_read, memory_write, cancel_order, general_support. "
-            "Use the current active IDs when the user refers to 'it' or omits the order number. "
-            "For a complaint without details, set intent=complaint, requires_follow_up=false, "
-            "and use a concise generic issue such as 'customer requested to file a complaint'. "
-            "For memory writes, fill both memory_key and memory_value."
+            "You are a tool-calling planner for a customer service agent. "
+            "Call tools instead of answering directly. Use read tools to gather facts and action "
+            "request tools to describe requested mutations. Action request tools do not execute "
+            "until a verifier approves them. For refunds and cancellations, call order_lookup and "
+            "the matching action request tool in the same planner response. If the user asks for "
+            "a refund, you must call request_refund. If the user asks to cancel, you must call "
+            "request_cancel_order. For customer profile, call customer_profile. "
+            "For issue history, call read_customer_memory, list_customer_complaints, and "
+            "summarize_issue_patterns. For complaints, call request_log_complaint; if details are "
+            "missing, use issue='customer requested to file a complaint'. For memory writes, call "
+            "request_write_memory with a key and value. Use the current active IDs when the user "
+            "refers to 'it' or omits the order number."
         )
         state_prompt = json.dumps(
             {
@@ -49,19 +156,14 @@ class StructuredChatReasoner(Reasoner):
                 "known_issue": state_snapshot.get("issue"),
             }
         )
-        result = self._planner.invoke(
+        response = self._planner.invoke(
             [
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=f"State: {state_prompt}"),
                 HumanMessage(content=f"User query: {user_message}"),
             ]
         )
-        result = _coerce_query_plan(result)
-        if result.order_id is None:
-            result.order_id = state_snapshot.get("active_order_id")
-        if result.customer_id is None:
-            result.customer_id = state_snapshot.get("active_customer_id")
-        return result
+        return _build_tool_plan(response, state_snapshot)
 
     def respond(self, context: ResponseContext) -> str:
         if context.verification_errors:
@@ -99,7 +201,7 @@ class OpenAIReasoner(StructuredChatReasoner):
         if settings.openai_base_url:
             kwargs["base_url"] = settings.openai_base_url
         self._model = ChatOpenAI(**kwargs)
-        self._planner = self._model.with_structured_output(QueryPlan)
+        self._planner = self._model.bind_tools(PLANNER_TOOLS)
 
 
 class GoogleReasoner(StructuredChatReasoner):
@@ -109,10 +211,7 @@ class GoogleReasoner(StructuredChatReasoner):
             temperature=0,
             api_key=settings.google_api_key,
         )
-        self._planner = self._model.with_structured_output(
-            schema=QueryPlan.model_json_schema(),
-            method="json_schema",
-        )
+        self._planner = self._model.bind_tools(PLANNER_TOOLS)
 
 
 def build_reasoner(settings: Settings) -> Reasoner:
@@ -128,14 +227,99 @@ def build_reasoner(settings: Settings) -> Reasoner:
     raise ValueError(f"Unsupported LLM_BACKEND: {settings.llm_backend}")
 
 
-def _coerce_query_plan(result: Any) -> QueryPlan:
-    if isinstance(result, QueryPlan):
-        return result
-    if isinstance(result, dict):
-        return QueryPlan.model_validate(result)
-    if isinstance(result, str):
-        return QueryPlan.model_validate_json(result)
-    raise TypeError(f"Planner returned unsupported result type: {type(result).__name__}")
+def _build_tool_plan(response: BaseMessage, state_snapshot: dict[str, Any]) -> ToolPlan:
+    raw_tool_calls = getattr(response, "tool_calls", []) or []
+    tool_calls = [_normalize_tool_call(tool_call) for tool_call in raw_tool_calls]
+    requested_actions = [call for call in tool_calls if call["name"] in ACTION_TOOL_NAMES]
+
+    planned_customer_id = _first_int_arg(tool_calls, "customer_id")
+    planned_order_id = _first_int_arg(tool_calls, "order_id")
+    customer_id = (
+        planned_customer_id
+        if planned_customer_id is not None
+        else state_snapshot.get("active_customer_id")
+    )
+    order_id = planned_order_id if planned_order_id is not None else state_snapshot.get("active_order_id")
+
+    for call in tool_calls:
+        args = call["args"]
+        if args.get("customer_id") is None and customer_id is not None:
+            args["customer_id"] = customer_id
+        if args.get("order_id") is None and order_id is not None:
+            args["order_id"] = order_id
+
+    intent = _derive_intent(tool_calls)
+    issue = _first_str_arg(tool_calls, "issue")
+    memory_key = _first_str_arg(tool_calls, "key")
+    memory_value = _first_str_arg(tool_calls, "value")
+    steps = [call["name"] for call in tool_calls]
+    reasoning = _message_text(response)
+    if reasoning == str(getattr(response, "content", "")) and not reasoning:
+        reasoning = "Tool calls selected by the model."
+
+    return ToolPlan(
+        tool_calls=tool_calls,
+        requested_actions=requested_actions,
+        intent=intent,
+        customer_id=customer_id,
+        order_id=order_id,
+        issue=issue,
+        memory_key=memory_key,
+        memory_value=memory_value,
+        requires_follow_up=not tool_calls,
+        follow_up_question="I need a little more detail to help with that." if not tool_calls else None,
+        steps=steps,
+        reasoning=reasoning,
+    )
+
+
+def _normalize_tool_call(tool_call: Any) -> dict[str, Any]:
+    if isinstance(tool_call, dict):
+        name = str(tool_call.get("name") or "")
+        args = tool_call.get("args") or {}
+        tool_call_id = tool_call.get("id")
+    else:
+        name = str(getattr(tool_call, "name", ""))
+        args = getattr(tool_call, "args", {}) or {}
+        tool_call_id = getattr(tool_call, "id", None)
+    return {"name": name, "args": dict(args), "id": tool_call_id}
+
+
+def _first_int_arg(tool_calls: list[dict[str, Any]], key: str) -> int | None:
+    for call in tool_calls:
+        value = call["args"].get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return None
+
+
+def _first_str_arg(tool_calls: list[dict[str, Any]], key: str) -> str | None:
+    for call in tool_calls:
+        value = call["args"].get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _derive_intent(tool_calls: list[dict[str, Any]]) -> str:
+    names = [call["name"] for call in tool_calls]
+    if "request_refund" in names:
+        return "refund_request"
+    if "request_cancel_order" in names:
+        return "cancel_order"
+    if "request_log_complaint" in names:
+        return "complaint"
+    if "request_write_memory" in names:
+        return "memory_write"
+    if any(name in names for name in {"read_customer_memory", "list_customer_complaints", "summarize_issue_patterns"}):
+        return "memory_read"
+    if "customer_profile" in names:
+        return "customer_profile"
+    if "order_lookup" in names:
+        return "order_status"
+    return "general_support"
 
 
 def _message_text(message: BaseMessage) -> str:
