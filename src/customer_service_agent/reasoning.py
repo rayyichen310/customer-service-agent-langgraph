@@ -19,6 +19,12 @@ READ_TOOL_NAMES = {
     "list_customer_complaints",
     "summarize_issue_patterns",
 }
+ORDER_TOOL_NAMES = {
+    "order_lookup",
+    "request_refund",
+    "request_cancel_order",
+    "request_log_complaint",
+}
 ACTION_TOOL_NAMES = {
     "request_refund",
     "request_cancel_order",
@@ -247,7 +253,11 @@ def _build_tool_plan(response: BaseMessage, state_snapshot: dict[str, Any]) -> T
         args = call["args"]
         if args.get("customer_id") is None and customer_id is not None:
             args["customer_id"] = customer_id
-        if args.get("order_id") is None and order_id is not None:
+        if (
+            call["name"] in ORDER_TOOL_NAMES
+            and args.get("order_id") is None
+            and order_id is not None
+        ):
             args["order_id"] = order_id
 
     issue = _first_str_arg(tool_calls, "issue")

@@ -8,7 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from customer_service_agent.graph.agent import CustomerServiceAgent
-from customer_service_agent.models import Base, Customer, Order
+from customer_service_agent.models import Base, Customer, CustomerMemory, Order
 from customer_service_agent.reasoning import ResponseContext, ToolPlan
 from customer_service_agent.repository import CustomerServiceRepository
 
@@ -23,7 +23,12 @@ def build_repository() -> CustomerServiceRepository:
     Base.metadata.create_all(engine)
     session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
     with session_factory() as session:
-        session.add(Customer(customer_id=7, name="Dana Lee", email="dana@example.com"))
+        session.add_all(
+            [
+                Customer(customer_id=7, name="Dana Lee", email="dana@example.com"),
+                Customer(customer_id=8, name="Evan Wu", email="evan@example.com"),
+            ]
+        )
         session.add(
             Order(
                 order_id=7890,
@@ -34,6 +39,7 @@ def build_repository() -> CustomerServiceRepository:
                 delivery_date=datetime.fromisoformat("2026-04-24T15:00:00"),
             )
         )
+        session.add(CustomerMemory(customer_id=7, key="preference", value="Prefers email"))
         session.commit()
     return CustomerServiceRepository(session_factory)
 
@@ -125,6 +131,86 @@ class CombinedThenActionReasoner:
         return "The refund request was submitted."
 
 
+class CustomerReadReasoner:
+    def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
+        if "order" in user_message.lower():
+            return ToolPlan(
+                tool_calls=[
+                    {"name": "order_lookup", "args": {"order_id": 7890}, "id": "lookup-1"}
+                ],
+                order_id=7890,
+                steps=["order_lookup"],
+            )
+        if "memory" in user_message.lower():
+            return ToolPlan(
+                tool_calls=[
+                    {
+                        "name": "read_customer_memory",
+                        "args": {"customer_id": state_snapshot.get("active_customer_id")},
+                        "id": "memory-1",
+                    }
+                ],
+                customer_id=state_snapshot.get("active_customer_id"),
+                steps=["read_customer_memory"],
+            )
+        return ToolPlan(
+            tool_calls=[
+                {
+                    "name": "customer_profile",
+                    "args": {"customer_id": state_snapshot.get("active_customer_id")},
+                    "id": "profile-1",
+                }
+            ],
+            customer_id=state_snapshot.get("active_customer_id"),
+            steps=["customer_profile"],
+        )
+
+    def respond(self, context: ResponseContext) -> str:
+        if context.verification_errors:
+            return context.verification_errors[0]
+        return ",".join(sorted(context.tool_results))
+
+
+class ComplaintThenProfileReasoner:
+    def __init__(self) -> None:
+        self.plan_snapshots: list[dict[str, Any]] = []
+
+    def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
+        self.plan_snapshots.append(state_snapshot)
+        if "complaint" in user_message.lower():
+            action = {
+                "name": "request_log_complaint",
+                "args": {
+                    "customer_id": state_snapshot.get("active_customer_id"),
+                    "issue": "package damaged",
+                },
+                "id": "complaint-1",
+            }
+            return ToolPlan(
+                tool_calls=[action],
+                requested_actions=[action],
+                customer_id=state_snapshot.get("active_customer_id"),
+                issue="package damaged",
+                steps=["request_log_complaint"],
+            )
+        return ToolPlan(
+            tool_calls=[
+                {
+                    "name": "customer_profile",
+                    "args": {"customer_id": state_snapshot.get("active_customer_id")},
+                    "id": "profile-1",
+                }
+            ],
+            customer_id=state_snapshot.get("active_customer_id"),
+            steps=["customer_profile"],
+        )
+
+    def respond(self, context: ResponseContext) -> str:
+        if context.verification_errors:
+            return context.verification_errors[0]
+        return str(context.tool_results)
+
+
 def test_refund_uses_react_loop_before_action() -> None:
     repository = build_repository()
     reasoner = RefundAfterObservationReasoner()
@@ -182,3 +268,57 @@ def test_react_loop_stops_at_iteration_limit() -> None:
     ]
     assert "refund" not in response.tool_results
     assert repository.get_order(7890)["status"] == "delivered"
+
+
+def test_profile_query_does_not_include_stale_order_result() -> None:
+    repository = build_repository()
+    agent = CustomerServiceAgent(CustomerReadReasoner(), repository)
+
+    first_response, _ = agent.trace("profile-pollution", "Check order 7890", customer_id=7)
+    second_response, _ = agent.trace("profile-pollution", "Show my profile", customer_id=7)
+
+    assert "order" in first_response.tool_results
+    assert set(second_response.tool_results) == {"customer"}
+    assert second_response.response == "customer"
+
+
+def test_memory_read_does_not_include_stale_order_result() -> None:
+    repository = build_repository()
+    agent = CustomerServiceAgent(CustomerReadReasoner(), repository)
+
+    first_response, _ = agent.trace("memory-pollution", "Check order 7890", customer_id=7)
+    second_response, _ = agent.trace("memory-pollution", "Read my memory", customer_id=7)
+
+    assert "order" in first_response.tool_results
+    assert set(second_response.tool_results) == {"memories"}
+    assert second_response.response == "memories"
+
+
+def test_customer_cannot_refund_another_customers_order() -> None:
+    repository = build_repository()
+    reasoner = RefundAfterObservationReasoner()
+    agent = CustomerServiceAgent(reasoner, repository)
+
+    response, updates = agent.trace("ownership-refund", "Refund order 7890 if delivered", customer_id=8)
+
+    verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
+    assert verifier_updates[-1]["verifier_decision"] == "blocked"
+    assert response.verifier_decision == "blocked"
+    assert response.verification_errors == ["Order 7890 does not belong to customer 8."]
+    assert "refund" not in response.tool_results
+    assert repository.get_order(7890)["status"] == "delivered"
+
+
+def test_stale_complaint_issue_does_not_reach_later_unrelated_request() -> None:
+    repository = build_repository()
+    reasoner = ComplaintThenProfileReasoner()
+    agent = CustomerServiceAgent(reasoner, repository)
+
+    complaint_response, _ = agent.trace("issue-pollution", "Log a complaint", customer_id=7)
+    profile_response, profile_updates = agent.trace("issue-pollution", "Show my profile", customer_id=7)
+
+    planner_updates = [update["state"] for update in profile_updates if update["node"] == "planner"]
+    assert complaint_response.tool_results["complaint"]["issue"] == "package damaged"
+    assert reasoner.plan_snapshots[-1]["issue"] is None
+    assert planner_updates[-1]["issue"] is None
+    assert "package damaged" not in profile_response.response

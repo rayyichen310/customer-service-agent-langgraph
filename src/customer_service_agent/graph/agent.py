@@ -35,7 +35,7 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
             "reasoning": plan.reasoning,
             "active_customer_id": next_customer_id,
             "active_order_id": next_order_id,
-            "issue": plan.issue or state.get("issue"),
+            "issue": plan.issue,
             "memory_key": plan.memory_key,
             "memory_value": plan.memory_value,
             "tool_calls": plan.tool_calls,
@@ -172,8 +172,20 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
                 "tool_results": tool_results,
             }
 
+        order_action_names = {"request_refund", "request_cancel_order"}
+        if active_customer_id is not None and order and order["customer_id"] != active_customer_id:
+            if action_names & order_action_names or requested_mutation in {"refund", "cancel"}:
+                errors.append(
+                    f"Order {order['order_id']} does not belong to customer {active_customer_id}."
+                )
+                return {
+                    "verifier_decision": "blocked",
+                    "verification_errors": errors,
+                    "tool_results": tool_results,
+                }
+
         combined_read_and_order_action = bool(
-            action_names & {"request_refund", "request_cancel_order"} and called_order_lookup
+            action_names & order_action_names and called_order_lookup
         )
         if combined_read_and_order_action:
             if can_replan:
@@ -283,12 +295,18 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
             if name == "request_refund":
                 order_id = _prefer_explicit_int(args.get("order_id"), active_order_id)
                 if order_id is not None:
-                    tool_results["refund"] = repository.request_refund(order_id)
+                    tool_results["refund"] = repository.request_refund(
+                        order_id,
+                        customer_id=active_customer_id,
+                    )
 
             elif name == "request_cancel_order":
                 order_id = _prefer_explicit_int(args.get("order_id"), active_order_id)
                 if order_id is not None:
-                    tool_results["cancelled_order"] = repository.cancel_order(order_id)
+                    tool_results["cancelled_order"] = repository.cancel_order(
+                        order_id,
+                        customer_id=active_customer_id,
+                    )
 
             elif name == "request_log_complaint":
                 customer_id = _prefer_explicit_int(args.get("customer_id"), active_customer_id)
@@ -537,6 +555,15 @@ def _requested_order_mutation(message: str) -> str | None:
 def _new_turn_state(message: str, max_react_iterations: int) -> dict[str, Any]:
     return {
         "messages": [HumanMessage(content=message)],
+        "plan_steps": [],
+        "reasoning": None,
+        "issue": None,
+        "memory_key": None,
+        "memory_value": None,
+        "tool_calls": [],
+        "requested_actions": [],
+        "requires_follow_up": False,
+        "follow_up_question": None,
         "tool_results": {},
         "verification_errors": [],
         "verifier_decision": None,

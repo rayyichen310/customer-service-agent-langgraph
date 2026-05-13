@@ -47,20 +47,20 @@ class CustomerServiceRepository:
                 return None
             return _customer_to_dict(customer)
 
-    def request_refund(self, order_id: int) -> dict[str, Any] | None:
+    def request_refund(self, order_id: int, customer_id: int | None = None) -> dict[str, Any] | None:
         with self._session_factory() as session:
             order = session.get(Order, order_id)
-            if not order:
+            if not order or (customer_id is not None and order.customer_id != customer_id):
                 return None
             order.status = "refund_requested"
             session.commit()
             session.refresh(order)
             return _order_to_dict(order)
 
-    def cancel_order(self, order_id: int) -> dict[str, Any] | None:
+    def cancel_order(self, order_id: int, customer_id: int | None = None) -> dict[str, Any] | None:
         with self._session_factory() as session:
             order = session.get(Order, order_id)
-            if not order:
+            if not order or (customer_id is not None and order.customer_id != customer_id):
                 return None
             order.status = "cancel_requested"
             session.commit()
@@ -73,8 +73,12 @@ class CustomerServiceRepository:
         issue: str,
         order_id: int | None = None,
         status: str = "open",
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
         with self._session_factory() as session:
+            if order_id is not None:
+                order = session.get(Order, order_id)
+                if not order or order.customer_id != customer_id:
+                    return None
             complaint = Complaint(
                 customer_id=customer_id,
                 order_id=order_id,
@@ -162,4 +166,3 @@ class CustomerServiceRepository:
             "issue_counts": dict(counts),
             "repeated_late_delivery": counts["late_delivery"] >= 2,
         }
-

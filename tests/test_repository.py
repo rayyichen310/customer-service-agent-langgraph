@@ -82,6 +82,15 @@ def test_request_refund_updates_status() -> None:
     assert refund["status"] == "refund_requested"
 
 
+def test_request_refund_requires_matching_customer_when_provided() -> None:
+    repository = build_repository()
+
+    refund = repository.request_refund(5678, customer_id=1)
+
+    assert refund is None
+    assert repository.get_order(5678)["status"] == "delivered"
+
+
 def test_cancel_order_updates_status() -> None:
     repository = build_repository()
 
@@ -89,6 +98,15 @@ def test_cancel_order_updates_status() -> None:
 
     assert cancelled is not None
     assert cancelled["status"] == "cancel_requested"
+
+
+def test_cancel_order_requires_matching_customer_when_provided() -> None:
+    repository = build_repository()
+
+    cancelled = repository.cancel_order(12345, customer_id=2)
+
+    assert cancelled is None
+    assert repository.get_order(12345)["status"] == "in_transit"
 
 
 def test_log_complaint_and_write_memory() -> None:
@@ -99,6 +117,15 @@ def test_log_complaint_and_write_memory() -> None:
 
     assert complaint["issue"] == "package damaged"
     assert memory["key"] == "service_note"
+
+
+def test_log_complaint_requires_order_to_belong_to_customer() -> None:
+    repository = build_repository()
+
+    complaint = repository.log_complaint(customer_id=2, order_id=12345, issue="package damaged")
+
+    assert complaint is None
+    assert repository.list_complaints(2) == []
 
 
 def test_read_memory_and_issue_patterns() -> None:
