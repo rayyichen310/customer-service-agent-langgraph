@@ -8,6 +8,7 @@ dependencies:
       - cryptography>=45.0.0
       - fastapi>=0.115.0
       - langchain-core>=0.3.0
+      - langchain-google-genai>=4.2.2
       - langchain-openai>=0.3.0
       - langgraph>=0.3.0
       - pydantic>=2.8.0

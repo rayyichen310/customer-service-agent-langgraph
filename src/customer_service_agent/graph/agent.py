@@ -60,10 +60,14 @@ def build_graph(reasoner, repository):
             tool_results["customer"] = repository.get_customer(active_customer_id)
 
         elif intent == "refund_request":
-            pass
+            order = tool_results.get("order")
+            if order and order["status"] == "delivered":
+                tool_results["refund"] = repository.request_refund(order["order_id"])
 
         elif intent == "cancel_order":
-            pass
+            order = tool_results.get("order")
+            if order and order["status"] not in {"delivered", "refund_requested"}:
+                tool_results["cancelled_order"] = repository.cancel_order(order["order_id"])
 
         elif intent == "complaint":
             issue = state.get("issue") or "Unspecified issue"
@@ -147,18 +151,16 @@ def build_graph(reasoner, repository):
                 errors.append(
                     f"Order {order['order_id']} is currently `{order['status']}` and is not eligible for refund yet."
                 )
-            else:
-                refund = repository.request_refund(order["order_id"])
-                tool_results["refund"] = refund
+            elif not tool_results.get("refund"):
+                errors.append(f"I could not initiate a refund for order {order['order_id']}.")
 
         if intent == "cancel_order" and order:
             if order["status"] in {"delivered", "refund_requested"}:
                 errors.append(
                     f"Order {order['order_id']} is currently `{order['status']}` and cannot be cancelled."
                 )
-            else:
-                cancelled_order = repository.cancel_order(order["order_id"])
-                tool_results["cancelled_order"] = cancelled_order
+            elif not tool_results.get("cancelled_order"):
+                errors.append(f"I could not cancel order {order['order_id']}.")
 
         if intent == "customer_profile" and not tool_results.get("customer"):
             errors.append("Customer profile was not found.")
@@ -233,3 +235,81 @@ class CustomerServiceAgent:
             tool_results=result.get("tool_results", {}),
             verification_errors=result.get("verification_errors", []),
         )
+
+    def trace(
+        self,
+        thread_id: str,
+        message: str,
+        customer_id: int | None = None,
+    ) -> tuple[ChatResponse, list[dict[str, Any]]]:
+        state: dict[str, Any] = {"messages": [HumanMessage(content=message)]}
+        if customer_id is not None:
+            state["active_customer_id"] = customer_id
+
+        updates: list[dict[str, Any]] = []
+        result: dict[str, Any] = {}
+        config = {"configurable": {"thread_id": thread_id}}
+
+        for update in self._graph.stream(state, config=config, stream_mode="updates"):
+            for node_name, node_update in update.items():
+                updates.append(
+                    {
+                        "node": node_name,
+                        "state": _summarize_node_update(node_name, node_update),
+                    }
+                )
+
+        snapshot = self._graph.get_state(config)
+        if isinstance(snapshot.values, dict):
+            result = snapshot.values
+
+        return (
+            ChatResponse(
+                thread_id=thread_id,
+                response=result.get("final_response") or "",
+                intent=result.get("intent") or "general_support",
+                order_id=result.get("active_order_id"),
+                customer_id=result.get("active_customer_id"),
+                tool_results=result.get("tool_results", {}),
+                verification_errors=result.get("verification_errors", []),
+            ),
+            updates,
+        )
+
+
+def _summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, Any]:
+    if node_name == "planner":
+        return {
+            "intent": update.get("intent"),
+            "active_customer_id": update.get("active_customer_id"),
+            "active_order_id": update.get("active_order_id"),
+            "issue": update.get("issue"),
+            "memory_key": update.get("memory_key"),
+            "memory_value": update.get("memory_value"),
+            "requires_follow_up": update.get("requires_follow_up"),
+            "plan_steps": update.get("plan_steps", []),
+            "reasoning": update.get("reasoning"),
+        }
+    if node_name == "tools":
+        tool_results = update.get("tool_results", {})
+        return {
+            "active_customer_id": update.get("active_customer_id"),
+            "active_order_id": update.get("active_order_id"),
+            "tool_result_keys": list(tool_results.keys()),
+            "tool_results": tool_results,
+        }
+    if node_name == "memory":
+        long_term_memory = update.get("long_term_memory", [])
+        return {
+            "long_term_memory_count": len(long_term_memory),
+            "long_term_memory": long_term_memory,
+        }
+    if node_name == "verifier":
+        tool_results = update.get("tool_results", {})
+        return {
+            "verification_errors": update.get("verification_errors", []),
+            "tool_result_keys": list(tool_results.keys()),
+        }
+    if node_name == "respond":
+        return {"final_response": update.get("final_response")}
+    return update

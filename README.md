@@ -78,7 +78,15 @@ curl -X POST http://127.0.0.1:8000/chat \
 
 ## LLM Mode
 
-Set a real OpenAI-compatible backend in `.env`:
+The default demo backend is Google AI Studio with Gemma:
+
+```bash
+LLM_BACKEND=google
+GOOGLE_API_KEY=...
+GOOGLE_MODEL=gemma-4-31b-it
+```
+
+OpenAI remains supported:
 
 ```bash
 LLM_BACKEND=openai
@@ -90,6 +98,32 @@ OPENAI_MODEL=gpt-4.1-mini
 
 ```bash
 pytest
+```
+
+Run the natural-language PDF scorecard against the configured LLM and MySQL:
+
+```bash
+conda run --no-capture-output -n customer-service-agent python scripts/run_scorecard.py
+```
+
+The scorecard reuses one `thread_id` across the PDF queries so `Cancel it` exercises short-term memory from the previous order query. It writes refunds, complaints, and memory records during the run, then cleans up the demo database before exiting.
+
+For a repeatable demo with the seeded MySQL rows, reset the known demo records first:
+
+```bash
+conda run --no-capture-output -n customer-service-agent python scripts/run_scorecard.py --reset-demo-data
+```
+
+To inspect the written rows after a run, opt out of cleanup:
+
+```bash
+conda run --no-capture-output -n customer-service-agent python scripts/run_scorecard.py --keep-demo-data
+```
+
+To show how each LangGraph node updates state during the run:
+
+```bash
+conda run --no-capture-output -n customer-service-agent python scripts/run_scorecard.py --reset-demo-data --show-node-trace
 ```
 
 ## Project Structure

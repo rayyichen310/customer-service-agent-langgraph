@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4.1-mini"
     openai_api_key: str | None = None
     openai_base_url: str | None = None
+    google_model: str = "gemma-4-31b-it"
+    google_api_key: str | None = None
     database_url: str = Field(
         default="mysql+pymysql://appuser:apppass@127.0.0.1:3306/customer_service"
     )
