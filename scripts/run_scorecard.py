@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -335,6 +336,11 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
             _response_mentions(response, "refund", "5678"),
             "refund response should mention the grounded refund and order",
         )
+        require(_has_successful_action_style(response), "refund response should use 2-3 concise sentences")
+        require(
+            not _response_makes_unsupported_future_promise(response),
+            "refund response should not promise unsupported future handling",
+        )
         require(not _response_says_already_requested(response), "refund response should not say already requested")
         require(not errors, "refund should not ask for more info")
     elif number == 5:
@@ -350,6 +356,12 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
         require(
             _response_mentions(response, "complaint", "2222"),
             "complaint response should mention the grounded complaint and order",
+        )
+        require(_has_successful_action_style(response), "complaint response should use 2-3 concise sentences")
+        require(_has_empathy_phrase(response), "complaint response should include brief empathy")
+        require(
+            not _response_makes_unsupported_future_promise(response),
+            "complaint response should not promise unsupported future handling",
         )
     elif number == 6:
         require(
@@ -373,6 +385,14 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
             "conditional refund response should mention the grounded refund and order",
         )
         require(
+            _has_successful_action_style(response),
+            "conditional refund response should use 2-3 concise sentences",
+        )
+        require(
+            not _response_makes_unsupported_future_promise(response),
+            "conditional refund response should not promise unsupported future handling",
+        )
+        require(
             not _response_says_already_requested(response),
             "conditional refund response should not say already requested",
         )
@@ -394,6 +414,14 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
             "memory write response should be grounded to refund_preference",
         )
         require(_response_mentions(response, "refund"), "memory write response should mention the grounded preference")
+        require(
+            _has_successful_action_style(response),
+            "memory write response should use 2-3 concise sentences",
+        )
+        require(
+            not _response_makes_unsupported_future_promise(response),
+            "memory write response should not promise unsupported future handling",
+        )
         require(not errors, "memory write should not ask for more info")
     elif number == 10:
         require("request_log_complaint" in requested_actions, "personalization should log complaint")
@@ -411,6 +439,15 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
                 _response_mentions(response, "late"),
                 "personalized response should mention the grounded late-delivery issue",
             )
+        require(
+            _has_successful_action_style(response),
+            "personalized complaint response should use 2-3 concise sentences",
+        )
+        require(_has_empathy_phrase(response), "personalized complaint response should include brief empathy")
+        require(
+            not _response_makes_unsupported_future_promise(response),
+            "personalized complaint response should not promise unsupported future handling",
+        )
     elif number == 11:
         require(errors == ["Order 0 does not exist."], "invalid refund should be blocked by verifier")
 
@@ -437,6 +474,45 @@ def _response_mentions(response: str, *terms: str) -> bool:
 def _response_says_already_requested(response: str) -> bool:
     normalized = response.lower()
     return "already requested" in normalized or "already submitted" in normalized
+
+
+def _has_successful_action_style(response: str) -> bool:
+    return 2 <= _sentence_count(response) <= 3
+
+
+def _sentence_count(response: str) -> int:
+    return len([part for part in re.split(r"[.!?]+", response) if part.strip()])
+
+
+def _has_empathy_phrase(response: str) -> bool:
+    normalized = response.lower()
+    return any(
+        phrase in normalized
+        for phrase in {
+            "sorry",
+            "understand",
+            "appreciate",
+            "thanks",
+            "thank you",
+        }
+    )
+
+
+def _response_makes_unsupported_future_promise(response: str) -> bool:
+    normalized = response.lower()
+    blocked_phrases = {
+        "we are working",
+        "we're working",
+        "working to resolve",
+        "will follow up",
+        "we'll follow up",
+        "will investigate",
+        "we'll investigate",
+        "looking into",
+        "escalated",
+        "will be resolved",
+    }
+    return any(phrase in normalized for phrase in blocked_phrases)
 
 
 def _int_or_none(value: Any) -> int | None:

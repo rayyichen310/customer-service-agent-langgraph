@@ -194,6 +194,11 @@ class StructuredChatReasoner(Reasoner):
             "or any action that is not present in the verified facts. "
             "Do not make future handling promises unless response_constraints and verified "
             "facts support them. "
+            "For successful completed actions, write 2-3 concise customer-service sentences: "
+            "acknowledge the request or inconvenience, confirm the completed action using "
+            "verified facts, and mention only verified IDs or statuses when available. "
+            "For hard verifier errors, keep the answer direct and grounded; a polite one-sentence "
+            "reply is acceptable. "
             "Be concise, accurate, and personalized."
         )
         payload = {

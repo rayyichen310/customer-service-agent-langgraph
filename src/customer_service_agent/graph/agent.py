@@ -952,6 +952,7 @@ def _build_response_grounding(
             "order_id": complaint.get("order_id"),
             "issue": complaint.get("issue"),
             "status": complaint.get("status"),
+            "created_this_turn": True,
         }
 
     memory_write = tool_results.get("memory_write")
@@ -960,6 +961,7 @@ def _build_response_grounding(
             "customer_id": memory_write.get("customer_id"),
             "key": memory_write.get("key"),
             "value": memory_write.get("value"),
+            "created_this_turn": True,
         }
 
     memories = tool_results.get("memories")
@@ -999,8 +1001,26 @@ def _build_response_grounding(
         "Do not claim a mutation succeeded unless the matching verified fact is present.",
         "Do not promise future handling, follow-up, investigation, escalation, or resolution "
         "unless verified_facts or tool_results explicitly support that action or status.",
+        "Avoid unsupported phrases such as 'we are working on it', 'we will follow up', "
+        "'we are looking into it', 'I escalated this', or 'this will be resolved' unless "
+        "verified_facts explicitly include that future action or status.",
         "Use a warm customer-service tone while staying concise.",
     ]
+    has_successful_action = any(
+        key in verified_facts
+        for key in {
+            "refund_request",
+            "cancellation_request",
+            "complaint_logged",
+            "memory_written",
+        }
+    )
+    if has_successful_action:
+        constraints.append(
+            "For this successful completed action, write 2-3 concise sentences: "
+            "first acknowledge the request or inconvenience, then confirm the completed action "
+            "using verified_facts, and only mention verified IDs or statuses when available."
+        )
     if verification_errors:
         constraints.append(
             "For verifier errors, communicate the first error without adding unsupported action claims."
@@ -1011,8 +1031,9 @@ def _build_response_grounding(
         )
         if verified_facts["refund_request"].get("created_this_turn"):
             constraints.append(
-                "For this current-turn refund result, say the request was submitted or requested; "
-                "do not say it was already requested or already submitted."
+                "For this current-turn refund result, warmly confirm the refund request was "
+                "submitted or requested in this turn; do not say it was already requested or "
+                "already submitted."
             )
     if "cancellation_request" in verified_facts:
         constraints.append(
@@ -1020,12 +1041,14 @@ def _build_response_grounding(
         )
         if verified_facts["cancellation_request"].get("created_this_turn"):
             constraints.append(
-                "For this current-turn cancellation result, say the request was submitted or "
-                "requested; do not say it was already requested or already submitted."
+                "For this current-turn cancellation result, warmly confirm the cancellation "
+                "request was submitted or requested in this turn; do not say it was already "
+                "requested or already submitted."
             )
     if "complaint_logged" in verified_facts:
         constraints.append(
-            "For the complaint, only mention the order, issue, status, or complaint ID if present in verified_facts."
+            "For the complaint, include a brief empathy phrase and confirm the complaint was "
+            "logged using only the order, issue, status, or complaint ID present in verified_facts."
         )
     if "issue_patterns" in verified_facts:
         constraints.append(
@@ -1038,7 +1061,8 @@ def _build_response_grounding(
         )
     if "memory_written" in verified_facts:
         constraints.append(
-            "For memory writes, only confirm the saved key or value shown in verified_facts."
+            "For memory writes, warmly confirm the saved preference using only the key or value "
+            "shown in verified_facts."
         )
 
     return verified_facts, constraints

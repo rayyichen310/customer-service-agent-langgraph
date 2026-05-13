@@ -403,6 +403,8 @@ def test_refund_owned_delivered_order_routes_success_through_responder() -> None
     }
     assert "Do not invent refund status" in " ".join(response.response_constraints)
     assert "already requested" in " ".join(response.response_constraints)
+    assert "2-3 concise sentences" in " ".join(response.response_constraints)
+    assert "Do not promise future handling" in " ".join(response.response_constraints)
     assert response.response == "LLM guessed refund response"
     assert repository.get_order(5678)["status"] == "refund_requested"
 
@@ -426,6 +428,8 @@ def test_memory_write_resolves_pending_intent_and_routes_success_through_respond
     assert response.verification_errors == []
     assert response.tool_results["memory_write"]["key"] == "refund_preference"
     assert response.verified_facts["memory_written"]["key"] == "refund_preference"
+    assert response.verified_facts["memory_written"]["created_this_turn"] is True
+    assert "saved preference" in " ".join(response.response_constraints)
     assert response.response == "LLM guessed memory response"
     assert len(repository.read_memories(7, key="refund_preference")) == 1
 
@@ -469,6 +473,7 @@ def test_successful_mutations_use_responder_instead_of_deterministic_templates()
     }
     assert complaint_response.verified_facts["complaint_logged"]["order_id"] == 7890
     assert complaint_response.verified_facts["complaint_logged"]["issue"] == "package damaged"
+    assert complaint_response.verified_facts["complaint_logged"]["created_this_turn"] is True
     assert memory_response.verified_facts["memory_written"]["key"] == "contact_preference"
 
     assert cancel_response.response == "LLM guessed cancel response"
@@ -478,6 +483,8 @@ def test_successful_mutations_use_responder_instead_of_deterministic_templates()
     assert complaint_response.response != "Complaint logged for order 7890."
     assert memory_response.response != "Memory updated: contact_preference."
     assert "already requested" in " ".join(cancel_response.response_constraints)
+    assert "brief empathy phrase" in " ".join(complaint_response.response_constraints)
+    assert "2-3 concise sentences" in " ".join(complaint_response.response_constraints)
 
 
 def test_profile_query_does_not_include_stale_order_result() -> None:
