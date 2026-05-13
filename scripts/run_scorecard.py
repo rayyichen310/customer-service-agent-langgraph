@@ -150,6 +150,7 @@ def main() -> int:
                         "function": case["function"],
                         "query": case["query"],
                         "input_customer_id": case["customer_id"],
+                        "planner_iterations": planner_iterations(node_trace),
                         "tool_calls": planner_tool_call_names(node_trace),
                         "requested_actions": planner_requested_action_names(node_trace),
                         "order_id": result.order_id,
@@ -160,6 +161,7 @@ def main() -> int:
                         "node_trace": node_trace,
                     }
                 )
+                records[-1]["assertion_failures"] = scorecard_record_failures(records[-1])
                 if args.show_node_trace:
                     log_node_trace(args.quiet, node_trace)
                 log_progress(args.quiet, f"  tool_calls: {planner_tool_call_names(node_trace)}")
@@ -168,6 +170,8 @@ def main() -> int:
                     log_progress(args.quiet, f"  requested_actions: {actions}")
                 if result.verification_errors:
                     log_progress(args.quiet, f"  verifier: {result.verification_errors[0]}")
+                if records[-1]["assertion_failures"]:
+                    log_progress(args.quiet, f"  assertions: {records[-1]['assertion_failures']}")
                 log_progress(args.quiet, f"  response: {result.response}")
             except Exception as exc:
                 records.append(
@@ -185,8 +189,27 @@ def main() -> int:
             log_progress(args.quiet, "Cleaning up demo data...")
             reset_demo_data()
 
-    print(json.dumps({"thread_id": args.thread_id, "results": records}, ensure_ascii=True, indent=2))
-    return 1 if any("error" in record for record in records) else 0
+    failed_records = failed_scorecard_records(records)
+    print(
+        json.dumps(
+            {
+                "thread_id": args.thread_id,
+                "results": records,
+                "failed": [
+                    {
+                        "number": record["number"],
+                        "function": record["function"],
+                        "error": record.get("error"),
+                        "assertion_failures": record.get("assertion_failures", []),
+                    }
+                    for record in failed_records
+                ],
+            },
+            ensure_ascii=True,
+            indent=2,
+        )
+    )
+    return scorecard_exit_code(records)
 
 
 def log_progress(quiet: bool, message: str) -> None:
@@ -194,21 +217,125 @@ def log_progress(quiet: bool, message: str) -> None:
         print(message, file=sys.stderr, flush=True)
 
 
+def planner_iterations(node_trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    iterations = []
+    for index, item in enumerate(
+        [item for item in node_trace if item.get("node") == "planner"],
+        start=1,
+    ):
+        state = item.get("state", {})
+        iterations.append(
+            {
+                "iteration": index,
+                "tool_calls": [
+                    call.get("name", "")
+                    for call in state.get("tool_calls", [])
+                ],
+                "requested_actions": [
+                    action.get("name", "")
+                    for action in state.get("requested_actions", [])
+                ],
+                "requires_follow_up": state.get("requires_follow_up"),
+            }
+        )
+    return iterations
+
+
 def planner_tool_call_names(node_trace: list[dict[str, Any]]) -> list[str]:
+    names = []
     for item in node_trace:
         if item.get("node") == "planner":
-            return [call.get("name", "") for call in item.get("state", {}).get("tool_calls", [])]
-    return []
+            names.extend(
+                call.get("name", "")
+                for call in item.get("state", {}).get("tool_calls", [])
+            )
+    return names
 
 
 def planner_requested_action_names(node_trace: list[dict[str, Any]]) -> list[str]:
+    names = []
     for item in node_trace:
         if item.get("node") == "planner":
-            return [
+            names.extend(
                 action.get("name", "")
                 for action in item.get("state", {}).get("requested_actions", [])
-            ]
-    return []
+            )
+    return names
+
+
+def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
+    failures: list[str] = []
+    number = record["number"]
+    tool_results = record.get("tool_results", {})
+    tool_calls = record.get("tool_calls", [])
+    requested_actions = record.get("requested_actions", [])
+    errors = record.get("verification_errors", [])
+    response = record.get("response", "")
+
+    def require(condition: bool, message: str) -> None:
+        if not condition:
+            failures.append(message)
+
+    if number == 1:
+        require(tool_results.get("order", {}).get("status") == "in_transit", "order 12345 should be in_transit")
+    elif number == 2:
+        require(tool_results.get("order", {}).get("status") == "processing", "order 1001 should be processing")
+    elif number == 3:
+        require(tool_results.get("customer", {}).get("customer_id") == 1, "customer profile should be customer 1")
+        require("order" not in tool_results, "profile response should not include stale order result")
+    elif number == 4:
+        require("order_lookup" in tool_calls, "refund should look up order first")
+        require("request_refund" in requested_actions, "refund should request refund action")
+        require(tool_results.get("refund", {}).get("status") == "refund_requested", "order 5678 should be refund_requested")
+        require(response == "Refund request submitted for order 5678.", "refund response should use deterministic template")
+        require(not errors, "refund should not ask for more info")
+    elif number == 5:
+        require("request_log_complaint" in requested_actions, "complaint should request complaint action")
+        require(tool_results.get("complaint", {}).get("order_id") == 2222, "complaint should be logged for order 2222")
+        require(response == "Complaint logged for order 2222.", "complaint response should use deterministic template")
+    elif number == 6:
+        require(_ordered_contains(tool_calls, ["order_lookup", "request_refund"]), "conditional refund should look up before refund")
+        require(tool_results.get("refund", {}).get("status") == "refund_requested", "order 7890 should be refund_requested")
+        require(response == "Refund request submitted for order 7890.", "conditional refund response should use deterministic template")
+    elif number == 7:
+        require("little more detail" not in response.lower(), "cancel should not ask for more info when active order is known")
+        require(errors, "cancel should return a verifier policy error")
+    elif number == 8:
+        require("memories" in tool_results, "memory read should include memories")
+        require("complaints" in tool_results, "memory read should include complaints")
+        require("order" not in tool_results, "memory read should not include stale order result")
+    elif number == 9:
+        require("request_write_memory" in requested_actions, "memory write should request write action")
+        require(tool_results.get("memory_write", {}).get("key") == "refund_preference", "memory write should update refund_preference")
+        require(response == "Memory updated: refund_preference.", "memory write response should use deterministic template")
+        require(not errors, "memory write should not ask for more info")
+    elif number == 10:
+        require("request_log_complaint" in requested_actions, "personalization should log complaint")
+        require(tool_results.get("complaint", {}).get("issue"), "personalization should create complaint")
+    elif number == 11:
+        require(errors == ["Order 0 does not exist."], "invalid refund should be blocked by verifier")
+
+    return failures
+
+
+def failed_scorecard_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        record
+        for record in records
+        if "error" in record or record.get("assertion_failures")
+    ]
+
+
+def scorecard_exit_code(records: list[dict[str, Any]]) -> int:
+    return 1 if failed_scorecard_records(records) else 0
+
+
+def _ordered_contains(values: list[str], expected: list[str]) -> bool:
+    position = 0
+    for value in values:
+        if position < len(expected) and value == expected[position]:
+            position += 1
+    return position == len(expected)
 
 
 def log_node_trace(quiet: bool, node_trace: list[dict[str, Any]]) -> None:

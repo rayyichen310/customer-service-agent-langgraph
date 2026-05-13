@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from langchain_core.messages import HumanMessage
@@ -26,6 +27,7 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
             "max_react_iterations": state.get("max_react_iterations") or max_react_iterations,
         }
         plan = reasoner.plan(str(last_message), state_snapshot)
+        plan = _repair_plan_from_context(plan, str(last_message), state_snapshot)
         next_customer_id = (
             plan.customer_id if plan.customer_id is not None else state.get("active_customer_id")
         )
@@ -122,6 +124,13 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
 
     def verifier_node(state: AgentState) -> dict[str, Any]:
         if state.get("requires_follow_up"):
+            repaired = _repair_plan_from_context(None, _last_user_message(state), state)
+            if repaired.tool_calls:
+                return {
+                    "verifier_decision": "replan",
+                    "verification_errors": [],
+                    "tool_results": state.get("tool_results", {}),
+                }
             return {
                 "verifier_decision": "ask_user",
                 "verification_errors": [
@@ -345,6 +354,14 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
 
     def response_node(state: AgentState) -> dict[str, Any]:
         last_message = state["messages"][-1].content if state.get("messages") else ""
+        if state.get("verification_errors"):
+            response = state["verification_errors"][0]
+            return {"messages": [("assistant", response)], "final_response": response}
+
+        template_response = _mutation_response(state.get("tool_results", {}))
+        if template_response:
+            return {"messages": [("assistant", template_response)], "final_response": template_response}
+
         response = reasoner.respond(
             ResponseContext(
                 user_message=str(last_message),
@@ -417,6 +434,110 @@ def _needs_replan_after_read_tools(state: AgentState) -> bool:
         call.get("name") == "order_lookup" for call in state.get("tool_calls", [])
     )
     return called_order_lookup and bool(state.get("tool_results", {}).get("order"))
+
+
+def _repair_plan_from_context(
+    plan,
+    user_message: str,
+    state_snapshot: dict[str, Any],
+):
+    if plan is not None and plan.tool_calls:
+        return plan
+
+    active_customer_id = state_snapshot.get("active_customer_id")
+    active_order_id = state_snapshot.get("active_order_id")
+    tool_results = state_snapshot.get("tool_results", {})
+    order = tool_results.get("order")
+    requested_mutation = _requested_order_mutation(user_message)
+
+    if requested_mutation in {"refund", "cancel"}:
+        order_id = _int_from_message(user_message) or active_order_id
+        if order:
+            order_id = order["order_id"]
+            action_name = "request_refund" if requested_mutation == "refund" else "request_cancel_order"
+            action = {"name": action_name, "args": {"order_id": order_id}, "id": f"repaired-{action_name}"}
+            return _repaired_tool_plan(
+                action,
+                customer_id=active_customer_id,
+                order_id=order_id,
+                reasoning=f"Rule-based repair selected {action_name} from available order observation.",
+            )
+        if order_id is not None:
+            call = {"name": "order_lookup", "args": {"order_id": order_id}, "id": "repaired-order-lookup"}
+            return _repaired_tool_plan(
+                call,
+                customer_id=active_customer_id,
+                order_id=order_id,
+                reasoning="Rule-based repair selected order_lookup before an order mutation.",
+            )
+
+    if _requested_memory_write(user_message) and active_customer_id is not None:
+        key, value = _memory_preference(user_message)
+        if key and value:
+            action = {
+                "name": "request_write_memory",
+                "args": {"customer_id": active_customer_id, "key": key, "value": value},
+                "id": "repaired-memory-write",
+            }
+            return _repaired_tool_plan(
+                action,
+                customer_id=active_customer_id,
+                memory_key=key,
+                memory_value=value,
+                reasoning="Rule-based repair selected request_write_memory from the stated preference.",
+            )
+
+    if _requested_complaint(user_message) and active_customer_id is not None:
+        order_id = _int_from_message(user_message) or active_order_id
+        action = {
+            "name": "request_log_complaint",
+            "args": {
+                "customer_id": active_customer_id,
+                "order_id": order_id,
+                "issue": _complaint_issue(user_message),
+            },
+            "id": "repaired-complaint",
+        }
+        return _repaired_tool_plan(
+            action,
+            customer_id=active_customer_id,
+            order_id=order_id,
+            issue=action["args"]["issue"],
+            reasoning="Rule-based repair selected request_log_complaint from the complaint request.",
+        )
+
+    if plan is not None:
+        return plan
+    return _repaired_tool_plan(None)
+
+
+def _repaired_tool_plan(
+    call: dict[str, Any] | None,
+    *,
+    customer_id: int | None = None,
+    order_id: int | None = None,
+    issue: str | None = None,
+    memory_key: str | None = None,
+    memory_value: str | None = None,
+    reasoning: str = "",
+):
+    from customer_service_agent.reasoning import ACTION_TOOL_NAMES, ToolPlan
+
+    tool_calls = [call] if call else []
+    requested_actions = [call] if call and call["name"] in ACTION_TOOL_NAMES else []
+    return ToolPlan(
+        tool_calls=tool_calls,
+        requested_actions=requested_actions,
+        customer_id=customer_id,
+        order_id=order_id,
+        issue=issue,
+        memory_key=memory_key,
+        memory_value=memory_value,
+        requires_follow_up=not tool_calls,
+        follow_up_question="I need a little more detail to help with that." if not tool_calls else None,
+        steps=[call["name"]] if call else [],
+        reasoning=reasoning,
+    )
 
 
 class CustomerServiceAgent:
@@ -545,10 +666,85 @@ def _prefer_explicit_int(value: Any, fallback: int | None) -> int | None:
 
 def _requested_order_mutation(message: str) -> str | None:
     normalized = message.lower()
-    if "refund" in normalized:
+    if "refund" in normalized and (
+        "order" in normalized
+        or "refund it" in normalized
+        or normalized.strip().startswith("refund")
+    ):
         return "refund"
     if "cancel" in normalized or "cancellation" in normalized:
         return "cancel"
+    return None
+
+
+def _requested_memory_write(message: str) -> bool:
+    normalized = message.lower()
+    return "remember" in normalized or "preference" in normalized
+
+
+def _requested_complaint(message: str) -> bool:
+    normalized = message.lower()
+    complaint_words = {"complain", "complaint", "late", "damaged", "broken"}
+    return any(word in normalized for word in complaint_words)
+
+
+def _memory_preference(message: str) -> tuple[str | None, str | None]:
+    normalized = message.lower()
+    if "refund" in normalized:
+        return "refund_preference", "prefers refunds"
+    if "email" in normalized:
+        return "contact_preference", "prefers email"
+    if "remember" in normalized:
+        value = re.sub(r"^\s*remember\s+", "", message, flags=re.IGNORECASE).strip()
+        if value:
+            return "customer_preference", value
+    return None, None
+
+
+def _complaint_issue(message: str) -> str:
+    normalized = message.lower()
+    if "late" in normalized:
+        return "Order is late again" if "again" in normalized else "Order is late"
+    if "damaged" in normalized:
+        return "Package damaged"
+    if "broken" in normalized:
+        return "Item is broken"
+    return "customer requested to file a complaint"
+
+
+def _int_from_message(message: str) -> int | None:
+    match = re.search(r"\b\d+\b", message)
+    if not match:
+        return None
+    return int(match.group(0))
+
+
+def _last_user_message(state: dict[str, Any]) -> str:
+    if not state.get("messages"):
+        return ""
+    return str(state["messages"][-1].content)
+
+
+def _mutation_response(tool_results: dict[str, Any]) -> str | None:
+    refund = tool_results.get("refund")
+    if refund:
+        return f"Refund request submitted for order {refund['order_id']}."
+
+    cancelled = tool_results.get("cancelled_order")
+    if cancelled:
+        return f"Cancellation request submitted for order {cancelled['order_id']}."
+
+    complaint = tool_results.get("complaint")
+    if complaint:
+        order_id = complaint.get("order_id")
+        if order_id is not None:
+            return f"Complaint logged for order {order_id}."
+        return f"Complaint logged for customer {complaint['customer_id']}."
+
+    memory_write = tool_results.get("memory_write")
+    if memory_write:
+        return f"Memory updated: {memory_write['key']}."
+
     return None
 
 

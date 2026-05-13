@@ -99,8 +99,16 @@ class CustomerServiceRepository:
 
     def write_memory(self, customer_id: int, key: str, value: str) -> dict[str, Any]:
         with self._session_factory() as session:
-            memory = CustomerMemory(customer_id=customer_id, key=key, value=value)
-            session.add(memory)
+            stmt = select(CustomerMemory).where(
+                CustomerMemory.customer_id == customer_id,
+                CustomerMemory.key == key,
+            )
+            memory = session.scalars(stmt).first()
+            if memory:
+                memory.value = value
+            else:
+                memory = CustomerMemory(customer_id=customer_id, key=key, value=value)
+                session.add(memory)
             session.commit()
             session.refresh(memory)
             return {

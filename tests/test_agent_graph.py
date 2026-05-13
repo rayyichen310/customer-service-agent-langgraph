@@ -25,6 +25,7 @@ def build_repository() -> CustomerServiceRepository:
     with session_factory() as session:
         session.add_all(
             [
+                Customer(customer_id=2, name="Bob Lin", email="bob@example.com"),
                 Customer(customer_id=7, name="Dana Lee", email="dana@example.com"),
                 Customer(customer_id=8, name="Evan Wu", email="evan@example.com"),
             ]
@@ -37,6 +38,25 @@ def build_repository() -> CustomerServiceRepository:
                 status="delivered",
                 order_date=datetime.fromisoformat("2026-04-20T09:00:00"),
                 delivery_date=datetime.fromisoformat("2026-04-24T15:00:00"),
+            )
+        )
+        session.add(
+            Order(
+                order_id=5678,
+                customer_id=2,
+                product_name="Gaming Keyboard",
+                status="delivered",
+                order_date=datetime.fromisoformat("2026-04-20T09:00:00"),
+                delivery_date=datetime.fromisoformat("2026-04-24T15:00:00"),
+            )
+        )
+        session.add(
+            Order(
+                order_id=2468,
+                customer_id=7,
+                product_name="Monitor Arm",
+                status="processing",
+                order_date=datetime.fromisoformat("2026-04-21T09:00:00"),
             )
         )
         session.add(CustomerMemory(customer_id=7, key="preference", value="Prefers email"))
@@ -211,6 +231,86 @@ class ComplaintThenProfileReasoner:
         return str(context.tool_results)
 
 
+class RefundByMessageReasoner:
+    def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
+        order_id = 5678 if "5678" in user_message else 7890
+        order = state_snapshot.get("tool_results", {}).get("order")
+        if not order:
+            return ToolPlan(
+                tool_calls=[
+                    {"name": "order_lookup", "args": {"order_id": order_id}, "id": "lookup-1"}
+                ],
+                order_id=order_id,
+                steps=["order_lookup"],
+            )
+        action = {"name": "request_refund", "args": {"order_id": order["order_id"]}, "id": "refund-1"}
+        return ToolPlan(
+            tool_calls=[action],
+            requested_actions=[action],
+            order_id=order["order_id"],
+            steps=["request_refund"],
+        )
+
+    def respond(self, context: ResponseContext) -> str:
+        return "LLM guessed refund response"
+
+
+class CancelAfterObservationReasoner:
+    def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
+        order = state_snapshot.get("tool_results", {}).get("order")
+        if not order:
+            return ToolPlan(
+                tool_calls=[
+                    {"name": "order_lookup", "args": {"order_id": 2468}, "id": "lookup-1"}
+                ],
+                order_id=2468,
+                steps=["order_lookup"],
+            )
+        action = {"name": "request_cancel_order", "args": {"order_id": 2468}, "id": "cancel-1"}
+        return ToolPlan(
+            tool_calls=[action],
+            requested_actions=[action],
+            order_id=2468,
+            steps=["request_cancel_order"],
+        )
+
+    def respond(self, context: ResponseContext) -> str:
+        return "LLM guessed cancel response"
+
+
+class NoToolMemoryWriteReasoner:
+    def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
+        return ToolPlan(reasoning="I should remember the refund preference.")
+
+    def respond(self, context: ResponseContext) -> str:
+        return "LLM guessed memory response"
+
+
+class DirectMutationReasoner:
+    def __init__(self, action_name: str, args: dict[str, Any]):
+        self.action_name = action_name
+        self.args = args
+
+    def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
+        args = dict(self.args)
+        if "customer_id" not in args and state_snapshot.get("active_customer_id") is not None:
+            args["customer_id"] = state_snapshot["active_customer_id"]
+        action = {"name": self.action_name, "args": args, "id": f"{self.action_name}-1"}
+        return ToolPlan(
+            tool_calls=[action],
+            requested_actions=[action],
+            customer_id=args.get("customer_id"),
+            order_id=args.get("order_id"),
+            issue=args.get("issue"),
+            memory_key=args.get("key"),
+            memory_value=args.get("value"),
+            steps=[self.action_name],
+        )
+
+    def respond(self, context: ResponseContext) -> str:
+        return "LLM guessed mutation response"
+
+
 def test_refund_uses_react_loop_before_action() -> None:
     repository = build_repository()
     reasoner = RefundAfterObservationReasoner()
@@ -231,7 +331,7 @@ def test_refund_uses_react_loop_before_action() -> None:
     assert verifier_updates[-1]["verifier_decision"] == "approved"
     assert response.verifier_decision == "approved"
     assert response.tool_results["refund"]["status"] == "refund_requested"
-    assert response.response == "The refund request was submitted for order 7890."
+    assert response.response == "Refund request submitted for order 7890."
     assert repository.get_order(7890)["status"] == "refund_requested"
 
 
@@ -268,6 +368,72 @@ def test_react_loop_stops_at_iteration_limit() -> None:
     ]
     assert "refund" not in response.tool_results
     assert repository.get_order(7890)["status"] == "delivered"
+
+
+def test_refund_owned_delivered_order_succeeds_with_template_response() -> None:
+    repository = build_repository()
+    agent = CustomerServiceAgent(RefundByMessageReasoner(), repository)
+
+    response, _ = agent.trace("refund-5678", "Refund order 5678", customer_id=2)
+
+    assert response.verification_errors == []
+    assert response.tool_results["refund"]["status"] == "refund_requested"
+    assert response.response == "Refund request submitted for order 5678."
+    assert repository.get_order(5678)["status"] == "refund_requested"
+
+
+def test_memory_write_repairs_missing_tool_call_and_uses_template_response() -> None:
+    repository = build_repository()
+    agent = CustomerServiceAgent(NoToolMemoryWriteReasoner(), repository)
+
+    response, updates = agent.trace("memory-write", "Remember I prefer refunds", customer_id=7)
+
+    planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
+    assert planner_updates[0]["requested_actions"][0]["name"] == "request_write_memory"
+    assert response.verification_errors == []
+    assert response.tool_results["memory_write"]["key"] == "refund_preference"
+    assert response.response == "Memory updated: refund_preference."
+    assert len(repository.read_memories(7, key="refund_preference")) == 1
+
+
+def test_deterministic_mutation_response_templates() -> None:
+    repository = build_repository()
+
+    cancel_agent = CustomerServiceAgent(CancelAfterObservationReasoner(), repository)
+    cancel_response, _ = cancel_agent.trace("cancel-template", "Cancel order 2468", customer_id=7)
+
+    complaint_agent = CustomerServiceAgent(
+        DirectMutationReasoner(
+            "request_log_complaint",
+            {"order_id": 7890, "issue": "package damaged"},
+        ),
+        repository,
+    )
+    complaint_response, _ = complaint_agent.trace(
+        "complaint-template",
+        "I want to complain about order 7890",
+        customer_id=7,
+    )
+
+    memory_agent = CustomerServiceAgent(
+        DirectMutationReasoner(
+            "request_write_memory",
+            {"key": "contact_preference", "value": "prefers email"},
+        ),
+        repository,
+    )
+    memory_response, _ = memory_agent.trace(
+        "memory-template",
+        "Remember I prefer email",
+        customer_id=7,
+    )
+
+    assert cancel_response.response == "Cancellation request submitted for order 2468."
+    assert complaint_response.response == "Complaint logged for order 7890."
+    assert memory_response.response == "Memory updated: contact_preference."
+    assert "already" not in cancel_response.response.lower()
+    assert "already" not in complaint_response.response.lower()
+    assert "already" not in memory_response.response.lower()
 
 
 def test_profile_query_does_not_include_stale_order_result() -> None:

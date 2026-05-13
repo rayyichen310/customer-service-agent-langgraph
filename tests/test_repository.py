@@ -119,6 +119,18 @@ def test_log_complaint_and_write_memory() -> None:
     assert memory["key"] == "service_note"
 
 
+def test_write_memory_upserts_by_customer_and_key() -> None:
+    repository = build_repository()
+
+    first = repository.write_memory(customer_id=1, key="refund_preference", value="prefers refunds")
+    second = repository.write_memory(customer_id=1, key="refund_preference", value="strongly prefers refunds")
+    memories = repository.read_memories(1, key="refund_preference")
+
+    assert first["id"] == second["id"]
+    assert len(memories) == 1
+    assert memories[0]["value"] == "strongly prefers refunds"
+
+
 def test_log_complaint_requires_order_to_belong_to_customer() -> None:
     repository = build_repository()
 
