@@ -27,3 +27,30 @@ def test_scorecard_assertions_fail_bad_refund_record() -> None:
     assert failures
     assert "refund should request refund action" in failures
     assert run_scorecard.scorecard_exit_code([record]) == 1
+
+
+def test_scorecard_planner_iterations_include_pending_intent_metadata() -> None:
+    node_trace = [
+        {
+            "node": "planner",
+            "state": {
+                "tool_calls": [],
+                "requested_actions": [],
+                "pending_intent": "complaint",
+                "pending_order_id": 2222,
+                "requires_follow_up": False,
+            },
+        }
+    ]
+
+    assert run_scorecard.planner_iterations(node_trace) == [
+        {
+            "iteration": 1,
+            "tool_calls": [],
+            "requested_actions": [],
+            "pending_intent": "complaint",
+            "pending_order_id": 2222,
+            "pending_customer_id": None,
+            "requires_follow_up": False,
+        }
+    ]

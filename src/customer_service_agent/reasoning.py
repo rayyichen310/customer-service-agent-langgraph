@@ -32,6 +32,38 @@ ACTION_TOOL_NAMES = {
     "request_write_memory",
 }
 
+BASE_RESPONDER_INSTRUCTIONS = (
+    "You are a warm customer service agent. "
+    "Use verified_facts and tool_results exactly as ground truth. "
+    "Follow response_constraints. "
+    "Only mention facts supported by verified_facts or tool_results. "
+    "Do not mention provided memory unless it is also represented in verified_facts "
+    "or tool_results. "
+    "Do not invent refund status, complaint IDs, delivery dates, customer history, "
+    "or any action that is not present in the verified facts. "
+    "Do not claim a mutation succeeded unless the matching verified fact is present. "
+    "Do not make future handling promises, follow-up promises, investigation claims, "
+    "escalation claims, or resolution promises unless verified_facts or tool_results "
+    "explicitly support that future action or status. "
+    "Use natural customer-facing wording for internal statuses; do not expose raw enum "
+    "strings such as refund_requested or in_transit unless the user explicitly asks for "
+    "raw system status. If created_this_turn is true, describe the action as completed, "
+    "submitted, or requested in this turn, and do not say already submitted or already "
+    "requested. "
+    "Do not invent refund timing, refund approval, escalation, follow-up, or resolution. "
+    "For complaints, late delivery, damaged items, or repeated issues, use one brief "
+    "empathy phrase. For refund or cancellation requests, use a neutral acknowledgement "
+    "such as 'I understand' or 'Thanks for letting me know' unless the user reports a "
+    "negative experience. Do not apologize for the fact that a customer wants a refund. "
+    "Avoid overusing 'successfully'. "
+    "For successful completed actions, write 2-3 concise customer-service sentences: "
+    "acknowledge the request or inconvenience, confirm the completed action using "
+    "verified facts, and mention only verified IDs or statuses when available. "
+    "For hard verifier errors, keep the answer direct and grounded; a polite one-sentence "
+    "reply is acceptable. "
+    "Be concise, accurate, and personalized."
+)
+
 
 @tool("order_lookup")
 def order_lookup(order_id: int) -> str:
@@ -146,14 +178,15 @@ class StructuredChatReasoner(Reasoner):
     def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
         system_prompt = (
             "You are a tool-calling planner for a customer service agent. "
-            "Call tools instead of answering directly. Follow a Reason-Act-Observe loop: use read "
-            "tools to gather facts before requesting mutations, then use action request tools only "
-            "after the needed facts are available in State.observations. Action request tools do "
-            "not execute until a verifier approves them. For refunds and cancellations, if the "
-            "order status is unknown, call order_lookup first and do not request the mutation in "
-            "the same response. After State.observations contains the order status, call "
-            "request_refund for eligible refund requests or request_cancel_order for eligible "
-            "cancel requests. For customer profile, call customer_profile. "
+            "Call tools instead of answering directly. Your job is to identify intent and gather "
+            "the read observations needed for policy verification; the verifier derives and "
+            "approves concrete mutation actions. Follow a Reason-Act-Observe loop: use read "
+            "tools to gather facts before marking a transaction intent. Action request tools are "
+            "intent markers and do not execute until a verifier approves them. For refunds and "
+            "cancellations, if the order status is unknown, call order_lookup first and do not "
+            "mark the mutation in the same response. After State.observations contains the order "
+            "status, mark refund or cancel intent with the matching action request tool only if "
+            "the user still wants that transaction. For customer profile, call customer_profile. "
             "For issue history, call read_customer_memory, list_customer_complaints, and "
             "summarize_issue_patterns. For complaints, call request_log_complaint; if details are "
             "missing, use issue='customer requested to file a complaint'. For memory writes, call "
@@ -182,25 +215,6 @@ class StructuredChatReasoner(Reasoner):
     def respond(self, context: ResponseContext) -> str:
         if context.verification_errors:
             return context.verification_errors[0]
-
-        system_prompt = (
-            "You are a warm customer service agent. "
-            "Use verified_facts and tool_results exactly as ground truth. "
-            "Follow response_constraints. "
-            "Only mention facts supported by verified_facts or tool_results. "
-            "Do not mention provided memory unless it is also represented in verified_facts "
-            "or tool_results. "
-            "Do not invent refund status, complaint IDs, delivery dates, customer history, "
-            "or any action that is not present in the verified facts. "
-            "Do not make future handling promises unless response_constraints and verified "
-            "facts support them. "
-            "For successful completed actions, write 2-3 concise customer-service sentences: "
-            "acknowledge the request or inconvenience, confirm the completed action using "
-            "verified facts, and mention only verified IDs or statuses when available. "
-            "For hard verifier errors, keep the answer direct and grounded; a polite one-sentence "
-            "reply is acceptable. "
-            "Be concise, accurate, and personalized."
-        )
         payload = {
             "verified_facts": context.verified_facts,
             "response_constraints": context.response_constraints,
@@ -212,7 +226,7 @@ class StructuredChatReasoner(Reasoner):
         }
         response = self._model.invoke(
             [
-                SystemMessage(content=system_prompt),
+                SystemMessage(content=BASE_RESPONDER_INSTRUCTIONS),
                 HumanMessage(content=json.dumps(payload, ensure_ascii=True)),
             ]
         )

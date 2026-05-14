@@ -286,6 +286,42 @@ class NoToolMemoryWriteReasoner:
         return "LLM guessed memory response"
 
 
+class PendingIntentOnlyReasoner:
+    def __init__(
+        self,
+        intent: str,
+        *,
+        order_id: int | None = None,
+        issue: str | None = None,
+        memory_key: str | None = None,
+        memory_value: str | None = None,
+        response: str = "Done.",
+    ) -> None:
+        self.intent = intent
+        self.order_id = order_id
+        self.issue = issue
+        self.memory_key = memory_key
+        self.memory_value = memory_value
+        self.response = response
+
+    def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
+        return ToolPlan(
+            customer_id=state_snapshot.get("active_customer_id"),
+            order_id=self.order_id,
+            issue=self.issue,
+            memory_key=self.memory_key,
+            memory_value=self.memory_value,
+            pending_intent=self.intent,
+            pending_order_id=self.order_id,
+            reasoning=f"Planner identified {self.intent} intent only.",
+        )
+
+    def respond(self, context: ResponseContext) -> str:
+        if context.verification_errors:
+            return context.verification_errors[0]
+        return self.response
+
+
 class DirectMutationReasoner:
     def __init__(self, action_name: str, args: dict[str, Any]):
         self.action_name = action_name
@@ -323,7 +359,7 @@ def test_refund_uses_react_loop_before_action() -> None:
     assert [call["name"] for call in planner_updates[0]["tool_calls"]] == ["order_lookup"]
     assert planner_updates[0]["requested_actions"] == []
     assert planner_updates[0]["pending_intent"] == "refund"
-    assert planner_updates[0]["pending_action"] == "request_refund"
+    assert "pending_action" not in planner_updates[0]
     assert planner_updates[0]["pending_order_id"] == 7890
 
     assert reasoner.plan_snapshots[0]["tool_results"] == {}
@@ -347,20 +383,22 @@ def test_refund_uses_react_loop_before_action() -> None:
     assert repository.get_order(7890)["status"] == "refund_requested"
 
 
-def test_verifier_replans_combined_read_and_refund_action() -> None:
+def test_planner_action_calls_are_normalized_to_pending_intent() -> None:
     repository = build_repository()
     reasoner = CombinedThenActionReasoner()
     agent = CustomerServiceAgent(reasoner, repository)
 
     response, updates = agent.trace("react-combined", "Refund order 7890 if delivered")
 
+    planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
     verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
-    assert [update["verifier_decision"] for update in verifier_updates] == [
-        "replan",
-        "approved",
-    ]
+    assert [call["name"] for call in planner_updates[0]["tool_calls"]] == ["order_lookup"]
+    assert planner_updates[0]["requested_actions"] == []
+    assert planner_updates[0]["pending_intent"] == "refund"
+    assert "pending_action" not in planner_updates[0]
+    assert [update["verifier_decision"] for update in verifier_updates] == ["approved"]
     assert [update["node"] for update in updates].count("actions") == 1
-    assert reasoner.plan_calls == 2
+    assert reasoner.plan_calls == 1
     assert response.verifier_decision == "approved"
     assert response.tool_results["refund"]["status"] == "refund_requested"
 
@@ -401,10 +439,11 @@ def test_refund_owned_delivered_order_routes_success_through_responder() -> None
         "status": "refund_requested",
         "created_this_turn": True,
     }
-    assert "Do not invent refund status" in " ".join(response.response_constraints)
-    assert "already requested" in " ".join(response.response_constraints)
-    assert "2-3 concise sentences" in " ".join(response.response_constraints)
-    assert "Do not promise future handling" in " ".join(response.response_constraints)
+    constraints = " ".join(response.response_constraints)
+    assert "current-turn refund" in constraints
+    assert "raw status values" in constraints
+    assert "Do not invent refund status" not in constraints
+    assert "Do not promise future handling" not in constraints
     assert response.response == "LLM guessed refund response"
     assert repository.get_order(5678)["status"] == "refund_requested"
 
@@ -418,7 +457,7 @@ def test_memory_write_resolves_pending_intent_and_routes_success_through_respond
     planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
     verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
     assert planner_updates[0]["pending_intent"] == "memory_write"
-    assert planner_updates[0]["pending_action"] == "request_write_memory"
+    assert "pending_action" not in planner_updates[0]
     assert [action["name"] for action in verifier_updates[-1]["requested_actions"]] == [
         "request_write_memory"
     ]
@@ -429,9 +468,140 @@ def test_memory_write_resolves_pending_intent_and_routes_success_through_respond
     assert response.tool_results["memory_write"]["key"] == "refund_preference"
     assert response.verified_facts["memory_written"]["key"] == "refund_preference"
     assert response.verified_facts["memory_written"]["created_this_turn"] is True
-    assert "saved preference" in " ".join(response.response_constraints)
+    assert "saved key or value" in " ".join(response.response_constraints)
     assert response.response == "LLM guessed memory response"
     assert len(repository.read_memories(7, key="refund_preference")) == 1
+
+
+def test_pending_action_not_required_from_planner_for_transaction_intents() -> None:
+    cases = [
+        (
+            "refund",
+            PendingIntentOnlyReasoner("refund", order_id=7890),
+            "request_refund",
+            "Refund order 7890",
+            7,
+        ),
+        (
+            "cancel",
+            PendingIntentOnlyReasoner("cancel", order_id=2468),
+            "request_cancel_order",
+            "Cancel order 2468",
+            7,
+        ),
+        (
+            "complaint",
+            PendingIntentOnlyReasoner("complaint", order_id=7890, issue="package damaged"),
+            "request_log_complaint",
+            "I want to complain about order 7890",
+            7,
+        ),
+        (
+            "memory_write",
+            PendingIntentOnlyReasoner(
+                "memory_write",
+                memory_key="contact_preference",
+                memory_value="prefers email",
+            ),
+            "request_write_memory",
+            "Remember I prefer email",
+            7,
+        ),
+    ]
+
+    for intent, reasoner, expected_action, message, customer_id in cases:
+        repository = build_repository()
+        agent = CustomerServiceAgent(reasoner, repository)
+        response, updates = agent.trace(f"pending-{intent}", message, customer_id=customer_id)
+
+        planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
+        verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
+        assert planner_updates[-1]["pending_intent"] == intent
+        assert "pending_action" not in planner_updates[-1]
+        assert planner_updates[-1]["requested_actions"] == []
+        assert expected_action in [
+            action["name"] for action in verifier_updates[-1]["requested_actions"]
+        ]
+        assert response.verification_errors == []
+
+
+def test_pending_intent_refund_delivered_order_resolves_to_refund_action() -> None:
+    repository = build_repository()
+    reasoner = PendingIntentOnlyReasoner("refund", order_id=7890)
+    agent = CustomerServiceAgent(reasoner, repository)
+
+    response, updates = agent.trace("pending-refund-resolve", "Refund order 7890", customer_id=7)
+
+    verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
+    assert verifier_updates[-1]["reasoning"] == (
+        "Resolved pending intent refund into request_refund after verified order observation."
+    )
+    assert verifier_updates[-1]["requested_actions"] == [
+        {"name": "request_refund", "args": {"order_id": 7890}, "id": "resolved-request_refund"}
+    ]
+    assert response.tool_results["refund"]["status"] == "refund_requested"
+    assert repository.get_order(7890)["status"] == "refund_requested"
+
+
+def test_pending_intent_cancel_blocked_status_does_not_mutate() -> None:
+    repository = build_repository()
+    reasoner = PendingIntentOnlyReasoner("cancel", order_id=7890)
+    agent = CustomerServiceAgent(reasoner, repository)
+
+    response, updates = agent.trace("pending-cancel-blocked", "Cancel order 7890", customer_id=7)
+
+    verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
+    assert verifier_updates[-1]["verifier_decision"] == "blocked"
+    assert response.verification_errors == ["Order 7890 is delivered and cannot be cancelled."]
+    assert "cancelled_order" not in response.tool_results
+    assert repository.get_order(7890)["status"] == "delivered"
+
+
+def test_refund_response_uses_customer_facing_status_wording() -> None:
+    repository = build_repository()
+    reasoner = PendingIntentOnlyReasoner(
+        "refund",
+        order_id=7890,
+        response="The status is now refund_requested for order 7890.",
+    )
+    agent = CustomerServiceAgent(reasoner, repository)
+
+    response, _ = agent.trace("refund-status-wording", "Refund order 7890", customer_id=7)
+
+    assert response.verified_facts["refund_request"]["status"] == "refund_requested"
+    assert "refund_requested" not in response.response
+    assert "refund requested" in response.response.lower()
+
+
+def test_current_turn_refund_response_does_not_say_already_requested() -> None:
+    repository = build_repository()
+    reasoner = PendingIntentOnlyReasoner(
+        "refund",
+        order_id=7890,
+        response="The refund request is already submitted for order 7890.",
+    )
+    agent = CustomerServiceAgent(reasoner, repository)
+
+    response, _ = agent.trace("refund-current-turn-not-already", "Refund order 7890", customer_id=7)
+
+    assert response.verified_facts["refund_request"]["created_this_turn"] is True
+    assert "already submitted" not in response.response.lower()
+    assert "already requested" not in response.response.lower()
+
+
+def test_responder_future_promise_sentence_is_removed() -> None:
+    repository = build_repository()
+    reasoner = PendingIntentOnlyReasoner(
+        "refund",
+        order_id=7890,
+        response="I've submitted the refund request for order 7890. We will follow up soon.",
+    )
+    agent = CustomerServiceAgent(reasoner, repository)
+
+    response, _ = agent.trace("refund-no-future-promise", "Refund order 7890", customer_id=7)
+
+    assert "submitted the refund request" in response.response
+    assert "will follow up" not in response.response.lower()
 
 
 def test_successful_mutations_use_responder_instead_of_deterministic_templates() -> None:
@@ -482,9 +652,8 @@ def test_successful_mutations_use_responder_instead_of_deterministic_templates()
     assert cancel_response.response != "Cancellation request submitted for order 2468."
     assert complaint_response.response != "Complaint logged for order 7890."
     assert memory_response.response != "Memory updated: contact_preference."
-    assert "already requested" in " ".join(cancel_response.response_constraints)
+    assert "current-turn cancellation" in " ".join(cancel_response.response_constraints)
     assert "brief empathy phrase" in " ".join(complaint_response.response_constraints)
-    assert "2-3 concise sentences" in " ".join(complaint_response.response_constraints)
 
 
 def test_profile_query_does_not_include_stale_order_result() -> None:
