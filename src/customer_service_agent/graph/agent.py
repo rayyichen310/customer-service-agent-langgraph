@@ -57,11 +57,9 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
             "memory_key": plan.memory_key,
             "memory_value": plan.memory_value,
             "pending_intent": pending_intent,
-            "pending_action": None,
             "pending_order_id": pending_order_id if pending_intent else None,
             "tool_calls": plan.tool_calls,
             "requested_actions": plan.requested_actions,
-            "requires_follow_up": plan.requires_follow_up,
             "follow_up_question": plan.follow_up_question,
             "tool_results": state.get("tool_results", {}),
             "verifier_decision": None,
@@ -75,12 +73,18 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
         }
 
     def read_tool_node(state: AgentState) -> dict[str, Any]:
-        if state.get("requires_follow_up"):
+        if state.get("follow_up_question"):
             return {"tool_results": state.get("tool_results", {})}
 
         tool_results: dict[str, Any] = dict(state.get("tool_results", {}))
         active_customer_id = state.get("active_customer_id")
         active_order_id = state.get("active_order_id")
+        customer_read_tools = {
+            "customer_profile": ("customer", repository.get_customer),
+            "read_customer_memory": ("memories", repository.read_memories),
+            "list_customer_complaints": ("complaints", repository.list_complaints),
+            "summarize_issue_patterns": ("issue_patterns", repository.summarize_issue_patterns),
+        }
 
         for tool_call in state.get("tool_calls", []):
             name = tool_call.get("name")
@@ -96,29 +100,12 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
                         if active_customer_id is None:
                             active_customer_id = order["customer_id"]
 
-            elif name == "customer_profile":
+            elif name in customer_read_tools:
+                result_key, read_customer_data = customer_read_tools[name]
                 customer_id = prefer_explicit_int(args.get("customer_id"), active_customer_id)
                 if customer_id is not None:
                     active_customer_id = customer_id
-                    tool_results["customer"] = repository.get_customer(customer_id)
-
-            elif name == "read_customer_memory":
-                customer_id = prefer_explicit_int(args.get("customer_id"), active_customer_id)
-                if customer_id is not None:
-                    active_customer_id = customer_id
-                    tool_results["memories"] = repository.read_memories(customer_id)
-
-            elif name == "list_customer_complaints":
-                customer_id = prefer_explicit_int(args.get("customer_id"), active_customer_id)
-                if customer_id is not None:
-                    active_customer_id = customer_id
-                    tool_results["complaints"] = repository.list_complaints(customer_id)
-
-            elif name == "summarize_issue_patterns":
-                customer_id = prefer_explicit_int(args.get("customer_id"), active_customer_id)
-                if customer_id is not None:
-                    active_customer_id = customer_id
-                    tool_results["issue_patterns"] = repository.summarize_issue_patterns(customer_id)
+                    tool_results[result_key] = read_customer_data(customer_id)
 
         return {
             "tool_results": tool_results,
@@ -127,7 +114,7 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
         }
 
     def memory_node(state: AgentState) -> dict[str, Any]:
-        if state.get("requires_follow_up"):
+        if state.get("follow_up_question"):
             return {"long_term_memory": []}
 
         active_customer_id = state.get("active_customer_id")
@@ -238,7 +225,7 @@ def _route_after_verifier(state: AgentState) -> str:
 
 
 def _needs_replan_after_read_tools(state: AgentState) -> bool:
-    if state.get("requires_follow_up"):
+    if state.get("follow_up_question"):
         return False
     if state.get("pending_intent") in {"refund", "cancel"}:
         return False
@@ -271,25 +258,12 @@ class CustomerServiceAgent:
         message: str,
         customer_id: int | None = None,
     ) -> ChatResponse:
-        state = _new_turn_state(message, DEFAULT_MAX_REACT_ITERATIONS)
-        if customer_id is not None:
-            state["active_customer_id"] = customer_id
-
+        state = _new_turn_state(message, DEFAULT_MAX_REACT_ITERATIONS, customer_id)
         result = self._graph.invoke(
             state,
             config={"configurable": {"thread_id": thread_id}},
         )
-        return ChatResponse(
-            thread_id=thread_id,
-            response=result.get("final_response") or "",
-            order_id=result.get("active_order_id"),
-            customer_id=result.get("active_customer_id"),
-            tool_results=result.get("tool_results", {}),
-            verified_facts=result.get("verified_facts", {}),
-            response_constraints=result.get("response_constraints", []),
-            verifier_decision=result.get("verifier_decision"),
-            verification_errors=result.get("verification_errors", []),
-        )
+        return _chat_response(thread_id, result)
 
     def trace(
         self,
@@ -297,10 +271,7 @@ class CustomerServiceAgent:
         message: str,
         customer_id: int | None = None,
     ) -> tuple[ChatResponse, list[dict[str, Any]]]:
-        state = _new_turn_state(message, DEFAULT_MAX_REACT_ITERATIONS)
-        if customer_id is not None:
-            state["active_customer_id"] = customer_id
-
+        state = _new_turn_state(message, DEFAULT_MAX_REACT_ITERATIONS, customer_id)
         updates: list[dict[str, Any]] = []
         result: dict[str, Any] = {}
         config = {"configurable": {"thread_id": thread_id}}
@@ -319,23 +290,17 @@ class CustomerServiceAgent:
             result = snapshot.values
 
         return (
-            ChatResponse(
-                thread_id=thread_id,
-                response=result.get("final_response") or "",
-                order_id=result.get("active_order_id"),
-                customer_id=result.get("active_customer_id"),
-                tool_results=result.get("tool_results", {}),
-                verified_facts=result.get("verified_facts", {}),
-                response_constraints=result.get("response_constraints", []),
-                verifier_decision=result.get("verifier_decision"),
-                verification_errors=result.get("verification_errors", []),
-            ),
+            _chat_response(thread_id, result),
             updates,
         )
 
 
-def _new_turn_state(message: str, max_react_iterations: int) -> dict[str, Any]:
-    return {
+def _new_turn_state(
+    message: str,
+    max_react_iterations: int,
+    customer_id: int | None = None,
+) -> dict[str, Any]:
+    state = {
         "messages": [HumanMessage(content=message)],
         "plan_steps": [],
         "reasoning": None,
@@ -343,11 +308,9 @@ def _new_turn_state(message: str, max_react_iterations: int) -> dict[str, Any]:
         "memory_key": None,
         "memory_value": None,
         "pending_intent": None,
-        "pending_action": None,
         "pending_order_id": None,
         "tool_calls": [],
         "requested_actions": [],
-        "requires_follow_up": False,
         "follow_up_question": None,
         "tool_results": {},
         "verification_errors": [],
@@ -359,3 +322,20 @@ def _new_turn_state(message: str, max_react_iterations: int) -> dict[str, Any]:
         "long_term_memory": [],
         "final_response": None,
     }
+    if customer_id is not None:
+        state["active_customer_id"] = customer_id
+    return state
+
+
+def _chat_response(thread_id: str, result: dict[str, Any]) -> ChatResponse:
+    return ChatResponse(
+        thread_id=thread_id,
+        response=result.get("final_response") or "",
+        order_id=result.get("active_order_id"),
+        customer_id=result.get("active_customer_id"),
+        tool_results=result.get("tool_results", {}),
+        verified_facts=result.get("verified_facts", {}),
+        response_constraints=result.get("response_constraints", []),
+        verifier_decision=result.get("verifier_decision"),
+        verification_errors=result.get("verification_errors", []),
+    )

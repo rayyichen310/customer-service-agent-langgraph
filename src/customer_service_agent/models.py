@@ -87,11 +87,9 @@ class AgentState(MessagesState):
     memory_key: str | None
     memory_value: str | None
     pending_intent: str | None
-    pending_action: str | None
     pending_order_id: int | None
     tool_calls: list[dict[str, Any]]
     requested_actions: list[dict[str, Any]]
-    requires_follow_up: bool
     follow_up_question: str | None
     tool_results: dict[str, Any]
     verifier_decision: str | None

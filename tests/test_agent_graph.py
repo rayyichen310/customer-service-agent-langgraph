@@ -359,7 +359,6 @@ def test_refund_uses_react_loop_before_action() -> None:
     assert [call["name"] for call in planner_updates[0]["tool_calls"]] == ["order_lookup"]
     assert planner_updates[0]["requested_actions"] == []
     assert planner_updates[0]["pending_intent"] == "refund"
-    assert "pending_action" not in planner_updates[0]
     assert planner_updates[0]["pending_order_id"] == 7890
 
     assert reasoner.plan_snapshots[0]["tool_results"] == {}
@@ -395,7 +394,6 @@ def test_planner_action_calls_are_normalized_to_pending_intent() -> None:
     assert [call["name"] for call in planner_updates[0]["tool_calls"]] == ["order_lookup"]
     assert planner_updates[0]["requested_actions"] == []
     assert planner_updates[0]["pending_intent"] == "refund"
-    assert "pending_action" not in planner_updates[0]
     assert [update["verifier_decision"] for update in verifier_updates] == ["approved"]
     assert [update["node"] for update in updates].count("actions") == 1
     assert reasoner.plan_calls == 1
@@ -457,7 +455,6 @@ def test_memory_write_resolves_pending_intent_and_routes_success_through_respond
     planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
     verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
     assert planner_updates[0]["pending_intent"] == "memory_write"
-    assert "pending_action" not in planner_updates[0]
     assert [action["name"] for action in verifier_updates[-1]["requested_actions"]] == [
         "request_write_memory"
     ]
@@ -473,7 +470,7 @@ def test_memory_write_resolves_pending_intent_and_routes_success_through_respond
     assert len(repository.read_memories(7, key="refund_preference")) == 1
 
 
-def test_pending_action_not_required_from_planner_for_transaction_intents() -> None:
+def test_pending_intent_resolves_to_verifier_actions() -> None:
     cases = [
         (
             "refund",
@@ -517,7 +514,6 @@ def test_pending_action_not_required_from_planner_for_transaction_intents() -> N
         planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
         verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
         assert planner_updates[-1]["pending_intent"] == intent
-        assert "pending_action" not in planner_updates[-1]
         assert planner_updates[-1]["requested_actions"] == []
         assert expected_action in [
             action["name"] for action in verifier_updates[-1]["requested_actions"]

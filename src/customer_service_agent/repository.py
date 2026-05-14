@@ -29,6 +29,27 @@ def _customer_to_dict(customer: Customer) -> dict[str, Any]:
     }
 
 
+def _complaint_to_dict(complaint: Complaint) -> dict[str, Any]:
+    return {
+        "complaint_id": complaint.complaint_id,
+        "customer_id": complaint.customer_id,
+        "order_id": complaint.order_id,
+        "issue": complaint.issue,
+        "status": complaint.status,
+        "created_at": complaint.created_at.isoformat(),
+    }
+
+
+def _memory_to_dict(memory: CustomerMemory) -> dict[str, Any]:
+    return {
+        "id": memory.id,
+        "customer_id": memory.customer_id,
+        "key": memory.key,
+        "value": memory.value,
+        "created_at": memory.created_at.isoformat(),
+    }
+
+
 class CustomerServiceRepository:
     def __init__(self, session_factory: sessionmaker[Session]):
         self._session_factory = session_factory
@@ -48,21 +69,22 @@ class CustomerServiceRepository:
             return _customer_to_dict(customer)
 
     def request_refund(self, order_id: int, customer_id: int | None = None) -> dict[str, Any] | None:
-        with self._session_factory() as session:
-            order = session.get(Order, order_id)
-            if not order or (customer_id is not None and order.customer_id != customer_id):
-                return None
-            order.status = "refund_requested"
-            session.commit()
-            session.refresh(order)
-            return _order_to_dict(order)
+        return self._update_order_status(order_id, "refund_requested", customer_id)
 
     def cancel_order(self, order_id: int, customer_id: int | None = None) -> dict[str, Any] | None:
+        return self._update_order_status(order_id, "cancel_requested", customer_id)
+
+    def _update_order_status(
+        self,
+        order_id: int,
+        status: str,
+        customer_id: int | None = None,
+    ) -> dict[str, Any] | None:
         with self._session_factory() as session:
             order = session.get(Order, order_id)
             if not order or (customer_id is not None and order.customer_id != customer_id):
                 return None
-            order.status = "cancel_requested"
+            order.status = status
             session.commit()
             session.refresh(order)
             return _order_to_dict(order)
@@ -88,14 +110,7 @@ class CustomerServiceRepository:
             session.add(complaint)
             session.commit()
             session.refresh(complaint)
-            return {
-                "complaint_id": complaint.complaint_id,
-                "customer_id": complaint.customer_id,
-                "order_id": complaint.order_id,
-                "issue": complaint.issue,
-                "status": complaint.status,
-                "created_at": complaint.created_at.isoformat(),
-            }
+            return _complaint_to_dict(complaint)
 
     def write_memory(self, customer_id: int, key: str, value: str) -> dict[str, Any]:
         with self._session_factory() as session:
@@ -111,13 +126,7 @@ class CustomerServiceRepository:
                 session.add(memory)
             session.commit()
             session.refresh(memory)
-            return {
-                "id": memory.id,
-                "customer_id": memory.customer_id,
-                "key": memory.key,
-                "value": memory.value,
-                "created_at": memory.created_at.isoformat(),
-            }
+            return _memory_to_dict(memory)
 
     def read_memories(self, customer_id: int, key: str | None = None) -> list[dict[str, Any]]:
         with self._session_factory() as session:
@@ -126,16 +135,7 @@ class CustomerServiceRepository:
                 stmt = stmt.where(CustomerMemory.key == key)
             stmt = stmt.order_by(CustomerMemory.created_at.desc())
             memories = session.scalars(stmt).all()
-            return [
-                {
-                    "id": memory.id,
-                    "customer_id": memory.customer_id,
-                    "key": memory.key,
-                    "value": memory.value,
-                    "created_at": memory.created_at.isoformat(),
-                }
-                for memory in memories
-            ]
+            return [_memory_to_dict(memory) for memory in memories]
 
     def list_complaints(self, customer_id: int) -> list[dict[str, Any]]:
         with self._session_factory() as session:
@@ -145,17 +145,7 @@ class CustomerServiceRepository:
                 .order_by(Complaint.created_at.desc())
             )
             complaints = session.scalars(stmt).all()
-            return [
-                {
-                    "complaint_id": complaint.complaint_id,
-                    "customer_id": complaint.customer_id,
-                    "order_id": complaint.order_id,
-                    "issue": complaint.issue,
-                    "status": complaint.status,
-                    "created_at": complaint.created_at.isoformat(),
-                }
-                for complaint in complaints
-            ]
+            return [_complaint_to_dict(complaint) for complaint in complaints]
 
     def summarize_issue_patterns(self, customer_id: int) -> dict[str, Any]:
         complaints = self.list_complaints(customer_id)

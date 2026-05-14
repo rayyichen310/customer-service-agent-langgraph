@@ -241,7 +241,7 @@ def planner_iterations(node_trace: list[dict[str, Any]]) -> list[dict[str, Any]]
                 "pending_intent": state.get("pending_intent"),
                 "pending_order_id": state.get("pending_order_id"),
                 "pending_customer_id": state.get("pending_customer_id"),
-                "requires_follow_up": state.get("requires_follow_up"),
+                "follow_up_question": state.get("follow_up_question"),
             }
         )
     return iterations
@@ -552,7 +552,7 @@ def log_node_trace(quiet: bool, node_trace: list[dict[str, Any]]) -> None:
                 f"    customer={state.get('active_customer_id')} order={state.get('active_order_id')} "
                 f"pending_intent={state.get('pending_intent')} "
                 f"pending_order={state.get('pending_order_id')} "
-                f"follow_up={state.get('requires_follow_up')}",
+                f"follow_up={state.get('follow_up_question')}",
                 file=sys.stderr,
                 flush=True,
             )

@@ -38,7 +38,7 @@ def test_scorecard_planner_iterations_include_pending_intent_metadata() -> None:
                 "requested_actions": [],
                 "pending_intent": "complaint",
                 "pending_order_id": 2222,
-                "requires_follow_up": False,
+                "follow_up_question": None,
             },
         }
     ]
@@ -51,6 +51,6 @@ def test_scorecard_planner_iterations_include_pending_intent_metadata() -> None:
             "pending_intent": "complaint",
             "pending_order_id": 2222,
             "pending_customer_id": None,
-            "requires_follow_up": False,
+            "follow_up_question": None,
         }
     ]

@@ -6,10 +6,6 @@ from typing import Any
 from customer_service_agent.graph.planning import complaint_issue, requested_order_mutation
 
 
-ORDER_ACTION_NAMES = {"request_refund", "request_cancel_order"}
-CANCEL_BLOCKED_STATUSES = {"delivered", "refund_requested"}
-
-
 @dataclass(frozen=True)
 class PendingIntentResolution:
     action: dict[str, Any] | None = None
@@ -19,14 +15,60 @@ class PendingIntentResolution:
     ask_user: bool = False
 
 
+@dataclass(frozen=True)
+class OrderMutationRule:
+    action_name: str
+    missing_order_error: str
+    resolved_reasoning: str
+    allowed_status: str | None = None
+    blocked_statuses: tuple[str, ...] = ()
+    status_error: str = ""
+
+    def validate_order(self, order: dict[str, Any]) -> str | None:
+        status = order["status"]
+        if self.allowed_status is not None and status != self.allowed_status:
+            return self._format_status_error(order)
+        if status in self.blocked_statuses:
+            return self._format_status_error(order)
+        return None
+
+    def _format_status_error(self, order: dict[str, Any]) -> str:
+        return self.status_error.format(
+            order_id=order["order_id"],
+            status=customer_status_phrase(order["status"]),
+        )
+
+
+ORDER_MUTATION_RULES = {
+    "refund": OrderMutationRule(
+        action_name="request_refund",
+        missing_order_error="I could not complete the refund request within the reasoning step limit.",
+        resolved_reasoning=(
+            "Resolved pending intent refund into request_refund after verified order observation."
+        ),
+        allowed_status="delivered",
+        status_error="Order {order_id} is {status} and is not eligible for refund yet.",
+    ),
+    "cancel": OrderMutationRule(
+        action_name="request_cancel_order",
+        missing_order_error="I could not complete the cancellation request within the reasoning step limit.",
+        resolved_reasoning=(
+            "Resolved pending intent cancel into request_cancel_order after verified order observation."
+        ),
+        blocked_statuses=("delivered", "refund_requested"),
+        status_error="Order {order_id} is {status} and cannot be cancelled.",
+    ),
+}
+
+
+ORDER_ACTION_NAMES = {rule.action_name for rule in ORDER_MUTATION_RULES.values()}
+
+
 def verify_policy(state: dict[str, Any], *, max_react_iterations: int) -> dict[str, Any]:
-    if state.get("requires_follow_up") and not state.get("pending_intent"):
+    if state.get("follow_up_question") and not state.get("pending_intent"):
         return {
             "verifier_decision": "ask_user",
-            "verification_errors": [
-                state.get("follow_up_question")
-                or "I need a little more detail to help with that."
-            ],
+            "verification_errors": [state["follow_up_question"]],
         }
 
     errors: list[str] = []
@@ -36,7 +78,6 @@ def verify_policy(state: dict[str, Any], *, max_react_iterations: int) -> dict[s
     active_customer_id = state.get("active_customer_id")
     last_message = state["messages"][-1].content if state.get("messages") else ""
     pending_intent = state.get("pending_intent")
-    pending_action = None
     pending_order_id = state.get("pending_order_id")
     requested_mutation = (
         str(pending_intent)
@@ -94,7 +135,6 @@ def verify_policy(state: dict[str, Any], *, max_react_iterations: int) -> dict[s
         if resolution.action and resolution.action["name"] not in action_names:
             requested_actions.append(resolution.action)
             action_names.add(resolution.action["name"])
-            pending_action = resolution.action["name"]
             pending_order_id = resolution.pending_order_id
             resolved_reasoning = resolution.reasoning
 
@@ -117,7 +157,6 @@ def verify_policy(state: dict[str, Any], *, max_react_iterations: int) -> dict[s
         "verification_errors": errors,
         "tool_results": tool_results,
         "requested_actions": requested_actions,
-        "pending_action": pending_action,
         "pending_order_id": pending_order_id,
     }
     if resolved_reasoning:
@@ -134,14 +173,12 @@ def resolve_pending_intent(
     active_customer_id: int | None,
     last_message: str,
 ) -> PendingIntentResolution:
-    if pending_intent == "refund":
-        return _resolve_refund_intent(order, active_customer_id)
-    if pending_intent == "cancel":
-        return _resolve_cancel_intent(order, active_customer_id)
+    if pending_intent in ORDER_MUTATION_RULES:
+        return _resolve_order_mutation(pending_intent, order, active_customer_id)
     if pending_intent == "complaint":
         order_id = prefer_explicit_int(state.get("pending_order_id"), active_order_id)
         return PendingIntentResolution(
-            action=_resolved_pending_action(
+            action=_resolved_action(
                 "complaint",
                 order_id=order_id,
                 customer_id=active_customer_id,
@@ -157,7 +194,7 @@ def resolve_pending_intent(
                 ask_user=True,
             )
         return PendingIntentResolution(
-            action=_resolved_pending_action(
+            action=_resolved_action(
                 "memory_write",
                 customer_id=active_customer_id,
                 memory_key=state.get("memory_key"),
@@ -170,77 +207,42 @@ def resolve_pending_intent(
 
 def verify_action_policy(action_names: set[str], order: dict[str, Any] | None) -> list[str]:
     errors: list[str] = []
-    if "request_refund" in action_names and order and order["status"] != "delivered":
-        errors.append(
-            f"Order {order['order_id']} is {customer_status_phrase(order['status'])} and is not eligible for refund yet."
-        )
+    if not order:
+        return errors
 
-    if (
-        "request_cancel_order" in action_names
-        and order
-        and order["status"] in CANCEL_BLOCKED_STATUSES
-    ):
-        errors.append(
-            f"Order {order['order_id']} is {customer_status_phrase(order['status'])} and cannot be cancelled."
-        )
+    for rule in ORDER_MUTATION_RULES.values():
+        if rule.action_name in action_names:
+            error = rule.validate_order(order)
+            if error:
+                errors.append(error)
     return errors
 
 
-def _resolve_refund_intent(
+def _resolve_order_mutation(
+    pending_intent: str,
     order: dict[str, Any] | None,
     active_customer_id: int | None,
 ) -> PendingIntentResolution:
+    rule = ORDER_MUTATION_RULES[pending_intent]
     if not order:
-        return PendingIntentResolution(
-            errors=("I could not complete the refund request within the reasoning step limit.",)
-        )
-    if order["status"] != "delivered":
-        return PendingIntentResolution(
-            errors=(
-                f"Order {order['order_id']} is {customer_status_phrase(order['status'])} and is not eligible for refund yet.",
-            )
-        )
+        return PendingIntentResolution(errors=(rule.missing_order_error,))
+
+    error = rule.validate_order(order)
+    if error:
+        return PendingIntentResolution(errors=(error,))
+
     return PendingIntentResolution(
-        action=_resolved_pending_action(
-            "refund",
+        action=_resolved_action(
+            pending_intent,
             order_id=order["order_id"],
             customer_id=active_customer_id,
         ),
         pending_order_id=order["order_id"],
-        reasoning=(
-            "Resolved pending intent refund into request_refund after verified order observation."
-        ),
+        reasoning=rule.resolved_reasoning,
     )
 
 
-def _resolve_cancel_intent(
-    order: dict[str, Any] | None,
-    active_customer_id: int | None,
-) -> PendingIntentResolution:
-    if not order:
-        return PendingIntentResolution(
-            errors=("I could not complete the cancellation request within the reasoning step limit.",)
-        )
-    if order["status"] in CANCEL_BLOCKED_STATUSES:
-        return PendingIntentResolution(
-            errors=(
-                f"Order {order['order_id']} is {customer_status_phrase(order['status'])} and cannot be cancelled.",
-            )
-        )
-    return PendingIntentResolution(
-        action=_resolved_pending_action(
-            "cancel",
-            order_id=order["order_id"],
-            customer_id=active_customer_id,
-        ),
-        pending_order_id=order["order_id"],
-        reasoning=(
-            "Resolved pending intent cancel into request_cancel_order after verified order observation."
-        ),
-    )
-
-
-def _resolved_pending_action(
+def _resolved_action(
     pending_intent: str,
     *,
     order_id: int | None = None,

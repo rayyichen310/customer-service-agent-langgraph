@@ -15,7 +15,7 @@ def summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, A
             "pending_order_id": update.get("pending_order_id"),
             "tool_calls": update.get("tool_calls", []),
             "requested_actions": update.get("requested_actions", []),
-            "requires_follow_up": update.get("requires_follow_up"),
+            "follow_up_question": update.get("follow_up_question"),
             "plan_steps": update.get("plan_steps", []),
             "reasoning": update.get("reasoning"),
         }
@@ -39,7 +39,6 @@ def summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, A
             "verifier_decision": update.get("verifier_decision"),
             "verification_errors": update.get("verification_errors", []),
             "tool_result_keys": list(tool_results.keys()),
-            "pending_action": update.get("pending_action"),
             "pending_order_id": update.get("pending_order_id"),
             "requested_actions": update.get("requested_actions", []),
             "reasoning": update.get("reasoning"),

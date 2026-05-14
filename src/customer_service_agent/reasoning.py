@@ -5,135 +5,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
 from customer_service_agent.config import Settings
+from customer_service_agent.graph.tools import ACTION_TOOL_NAMES, ORDER_TOOL_NAMES, PLANNER_TOOLS
+from customer_service_agent.prompts import BASE_RESPONDER_INSTRUCTIONS, PLANNER_INSTRUCTIONS
 
 
-READ_TOOL_NAMES = {
-    "order_lookup",
-    "customer_profile",
-    "read_customer_memory",
-    "list_customer_complaints",
-    "summarize_issue_patterns",
-}
-ORDER_TOOL_NAMES = {
-    "order_lookup",
-    "request_refund",
-    "request_cancel_order",
-    "request_log_complaint",
-}
-ACTION_TOOL_NAMES = {
-    "request_refund",
-    "request_cancel_order",
-    "request_log_complaint",
-    "request_write_memory",
-}
-
-BASE_RESPONDER_INSTRUCTIONS = (
-    "You are a warm customer service agent. "
-    "Use verified_facts and tool_results exactly as ground truth. "
-    "Follow response_constraints. "
-    "Only mention facts supported by verified_facts or tool_results. "
-    "Do not mention provided memory unless it is also represented in verified_facts "
-    "or tool_results. "
-    "Do not invent refund status, complaint IDs, delivery dates, customer history, "
-    "or any action that is not present in the verified facts. "
-    "Do not claim a mutation succeeded unless the matching verified fact is present. "
-    "Do not make future handling promises, follow-up promises, investigation claims, "
-    "escalation claims, or resolution promises unless verified_facts or tool_results "
-    "explicitly support that future action or status. "
-    "Use natural customer-facing wording for internal statuses; do not expose raw enum "
-    "strings such as refund_requested or in_transit unless the user explicitly asks for "
-    "raw system status. If created_this_turn is true, describe the action as completed, "
-    "submitted, or requested in this turn, and do not say already submitted or already "
-    "requested. "
-    "Do not invent refund timing, refund approval, escalation, follow-up, or resolution. "
-    "For complaints, late delivery, damaged items, or repeated issues, use one brief "
-    "empathy phrase. For refund or cancellation requests, use a neutral acknowledgement "
-    "such as 'I understand' or 'Thanks for letting me know' unless the user reports a "
-    "negative experience. Do not apologize for the fact that a customer wants a refund. "
-    "Avoid overusing 'successfully'. "
-    "For successful completed actions, write 2-3 concise customer-service sentences: "
-    "acknowledge the request or inconvenience, confirm the completed action using "
-    "verified facts, and mention only verified IDs or statuses when available. "
-    "For hard verifier errors, keep the answer direct and grounded; a polite one-sentence "
-    "reply is acceptable. "
-    "Be concise, accurate, and personalized."
-)
-
-
-@tool("order_lookup")
-def order_lookup(order_id: int) -> str:
-    """Read order details by order ID."""
-    return "schema only"
-
-
-@tool("customer_profile")
-def customer_profile(customer_id: int) -> str:
-    """Read customer profile details by customer ID."""
-    return "schema only"
-
-
-@tool("read_customer_memory")
-def read_customer_memory(customer_id: int) -> str:
-    """Read long-term customer memory records."""
-    return "schema only"
-
-
-@tool("list_customer_complaints")
-def list_customer_complaints(customer_id: int) -> str:
-    """Read previous customer complaints."""
-    return "schema only"
-
-
-@tool("summarize_issue_patterns")
-def summarize_issue_patterns(customer_id: int) -> str:
-    """Read summarized complaint issue patterns for a customer."""
-    return "schema only"
-
-
-@tool("request_refund")
-def request_refund(order_id: int) -> str:
-    """Request a refund action for an order. Execution is gated by verifier policy."""
-    return "schema only"
-
-
-@tool("request_cancel_order")
-def request_cancel_order(order_id: int) -> str:
-    """Request a cancel action for an order. Execution is gated by verifier policy."""
-    return "schema only"
-
-
-@tool("request_log_complaint")
-def request_log_complaint(
-    customer_id: int | None = None,
-    order_id: int | None = None,
-    issue: str = "customer requested to file a complaint",
-) -> str:
-    """Request logging a customer complaint. Execution is gated by verifier policy."""
-    return "schema only"
-
-
-@tool("request_write_memory")
-def request_write_memory(customer_id: int | None = None, key: str = "", value: str = "") -> str:
-    """Request writing a long-term customer memory preference or note."""
-    return "schema only"
-
-
-PLANNER_TOOLS = [
-    order_lookup,
-    customer_profile,
-    read_customer_memory,
-    list_customer_complaints,
-    summarize_issue_patterns,
-    request_refund,
-    request_cancel_order,
-    request_log_complaint,
-    request_write_memory,
-]
+DEFAULT_FOLLOW_UP_QUESTION = "I need a little more detail to help with that."
 
 
 @dataclass
@@ -158,9 +38,7 @@ class ToolPlan:
     memory_key: str | None = None
     memory_value: str | None = None
     pending_intent: str | None = None
-    pending_action: str | None = None
     pending_order_id: int | None = None
-    requires_follow_up: bool = False
     follow_up_question: str | None = None
     steps: list[str] = field(default_factory=list)
     reasoning: str = ""
@@ -176,23 +54,6 @@ class Reasoner:
 
 class StructuredChatReasoner(Reasoner):
     def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
-        system_prompt = (
-            "You are a tool-calling planner for a customer service agent. "
-            "Call tools instead of answering directly. Your job is to identify intent and gather "
-            "the read observations needed for policy verification; the verifier derives and "
-            "approves concrete mutation actions. Follow a Reason-Act-Observe loop: use read "
-            "tools to gather facts before marking a transaction intent. Action request tools are "
-            "intent markers and do not execute until a verifier approves them. For refunds and "
-            "cancellations, if the order status is unknown, call order_lookup first and do not "
-            "mark the mutation in the same response. After State.observations contains the order "
-            "status, mark refund or cancel intent with the matching action request tool only if "
-            "the user still wants that transaction. For customer profile, call customer_profile. "
-            "For issue history, call read_customer_memory, list_customer_complaints, and "
-            "summarize_issue_patterns. For complaints, call request_log_complaint; if details are "
-            "missing, use issue='customer requested to file a complaint'. For memory writes, call "
-            "request_write_memory with a key and value. Use the current active IDs when the user "
-            "refers to 'it' or omits the order number."
-        )
         state_prompt = json.dumps(
             {
                 "active_customer_id": state_snapshot.get("active_customer_id"),
@@ -205,7 +66,7 @@ class StructuredChatReasoner(Reasoner):
         )
         response = self._planner.invoke(
             [
-                SystemMessage(content=system_prompt),
+                SystemMessage(content=PLANNER_INSTRUCTIONS),
                 HumanMessage(content=f"State: {state_prompt}"),
                 HumanMessage(content=f"User query: {user_message}"),
             ]
@@ -273,26 +134,9 @@ def _build_tool_plan(response: BaseMessage, state_snapshot: dict[str, Any]) -> T
     raw_tool_calls = getattr(response, "tool_calls", []) or []
     tool_calls = [_normalize_tool_call(tool_call) for tool_call in raw_tool_calls]
     requested_actions = [call for call in tool_calls if call["name"] in ACTION_TOOL_NAMES]
-
-    planned_customer_id = _first_int_arg(tool_calls, "customer_id")
-    planned_order_id = _first_int_arg(tool_calls, "order_id")
-    customer_id = (
-        planned_customer_id
-        if planned_customer_id is not None
-        else state_snapshot.get("active_customer_id")
-    )
-    order_id = planned_order_id if planned_order_id is not None else state_snapshot.get("active_order_id")
-
-    for call in tool_calls:
-        args = call["args"]
-        if args.get("customer_id") is None and customer_id is not None:
-            args["customer_id"] = customer_id
-        if (
-            call["name"] in ORDER_TOOL_NAMES
-            and args.get("order_id") is None
-            and order_id is not None
-        ):
-            args["order_id"] = order_id
+    customer_id = _planned_id(tool_calls, "customer_id", state_snapshot.get("active_customer_id"))
+    order_id = _planned_id(tool_calls, "order_id", state_snapshot.get("active_order_id"))
+    _fill_missing_ids(tool_calls, customer_id=customer_id, order_id=order_id)
 
     issue = _first_str_arg(tool_calls, "issue")
     memory_key = _first_str_arg(tool_calls, "key")
@@ -310,8 +154,7 @@ def _build_tool_plan(response: BaseMessage, state_snapshot: dict[str, Any]) -> T
         issue=issue,
         memory_key=memory_key,
         memory_value=memory_value,
-        requires_follow_up=not tool_calls,
-        follow_up_question="I need a little more detail to help with that." if not tool_calls else None,
+        follow_up_question=None if tool_calls else DEFAULT_FOLLOW_UP_QUESTION,
         steps=steps,
         reasoning=reasoning,
     )
@@ -327,6 +170,29 @@ def _normalize_tool_call(tool_call: Any) -> dict[str, Any]:
         args = getattr(tool_call, "args", {}) or {}
         tool_call_id = getattr(tool_call, "id", None)
     return {"name": name, "args": dict(args), "id": tool_call_id}
+
+
+def _planned_id(
+    tool_calls: list[dict[str, Any]],
+    key: str,
+    fallback: int | None,
+) -> int | None:
+    value = _first_int_arg(tool_calls, key)
+    return value if value is not None else fallback
+
+
+def _fill_missing_ids(
+    tool_calls: list[dict[str, Any]],
+    *,
+    customer_id: int | None,
+    order_id: int | None,
+) -> None:
+    for call in tool_calls:
+        args = call["args"]
+        if args.get("customer_id") is None and customer_id is not None:
+            args["customer_id"] = customer_id
+        if call["name"] in ORDER_TOOL_NAMES and args.get("order_id") is None and order_id is not None:
+            args["order_id"] = order_id
 
 
 def _first_int_arg(tool_calls: list[dict[str, Any]], key: str) -> int | None:

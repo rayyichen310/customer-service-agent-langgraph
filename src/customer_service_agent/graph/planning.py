@@ -3,7 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from customer_service_agent.reasoning import ACTION_TOOL_NAMES, ToolPlan
+from customer_service_agent.graph.tools import ACTION_TOOL_NAMES
+from customer_service_agent.reasoning import ToolPlan
 
 
 def apply_pending_intent_to_plan(
@@ -18,21 +19,13 @@ def apply_pending_intent_to_plan(
     if not pending_intent:
         return plan
 
-    active_order_id = state_snapshot.get("active_order_id")
     tool_results = state_snapshot.get("tool_results", {})
     order = tool_results.get("order")
     plan.pending_intent = pending_intent
-    if hasattr(plan, "pending_action"):
-        plan.pending_action = None
     strip_planned_mutation_actions(plan)
 
     if pending_intent in {"refund", "cancel"}:
-        order_id = first_not_none(
-            int_from_message(user_message),
-            plan.order_id,
-            state_snapshot.get("pending_order_id"),
-            active_order_id,
-        )
+        order_id = pending_order_id(user_message, plan, state_snapshot)
         if order:
             order_id = order["order_id"]
         plan.pending_order_id = order_id
@@ -51,8 +44,7 @@ def apply_pending_intent_to_plan(
                 f"Resolved pending intent {pending_intent} into order_lookup before transaction verification."
             )
         if not plan.tool_calls:
-            plan.requires_follow_up = False
-            plan.follow_up_question = None
+            clear_follow_up(plan)
         return plan
 
     if pending_intent == "memory_write":
@@ -64,27 +56,21 @@ def apply_pending_intent_to_plan(
         plan.memory_value = value
         plan.pending_order_id = None
         if not plan.tool_calls:
-            plan.requires_follow_up = False
-            plan.follow_up_question = None
-            plan.reasoning = "Resolved pending intent memory_write for verifier continuation."
+            clear_follow_up(
+                plan,
+                "Resolved pending intent memory_write for verifier continuation.",
+            )
         return plan
 
     if pending_intent == "complaint":
-        order_id = first_not_none(
-            int_from_message(user_message),
-            plan.order_id,
-            state_snapshot.get("pending_order_id"),
-            active_order_id,
-        )
+        order_id = pending_order_id(user_message, plan, state_snapshot)
         plan.pending_order_id = order_id
         if plan.order_id is None:
             plan.order_id = order_id
         if not plan.issue:
             plan.issue = complaint_issue(user_message)
         if not plan.tool_calls:
-            plan.requires_follow_up = False
-            plan.follow_up_question = None
-            plan.reasoning = "Resolved pending intent complaint for verifier continuation."
+            clear_follow_up(plan, "Resolved pending intent complaint for verifier continuation.")
         return plan
 
     return plan
@@ -92,7 +78,6 @@ def apply_pending_intent_to_plan(
 
 def empty_tool_plan() -> ToolPlan:
     return ToolPlan(
-        requires_follow_up=True,
         follow_up_question="I need a little more detail to help with that.",
     )
 
@@ -125,6 +110,21 @@ def strip_planned_mutation_actions(plan) -> None:
     ]
     plan.requested_actions = []
     plan.steps = [str(call.get("name") or "") for call in plan.tool_calls]
+
+
+def clear_follow_up(plan, reasoning: str | None = None) -> None:
+    plan.follow_up_question = None
+    if reasoning:
+        plan.reasoning = reasoning
+
+
+def pending_order_id(user_message: str, plan, state_snapshot: dict[str, Any]) -> int | None:
+    return first_not_none(
+        int_from_message(user_message),
+        plan.order_id,
+        state_snapshot.get("pending_order_id"),
+        state_snapshot.get("active_order_id"),
+    )
 
 
 def requested_order_mutation(message: str) -> str | None:
