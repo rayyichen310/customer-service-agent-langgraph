@@ -9,7 +9,13 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
 from customer_service_agent.config import Settings
-from customer_service_agent.graph.tools import ACTION_TOOL_NAMES, ORDER_TOOL_NAMES, PLANNER_TOOLS
+from customer_service_agent.models import MemoryWriteCandidate, OrderReference
+from customer_service_agent.graph.tools import (
+    ACTION_TOOL_NAMES,
+    CONTROL_TOOL_NAMES,
+    ORDER_TOOL_NAMES,
+    PLANNER_TOOLS,
+)
 from customer_service_agent.prompts import BASE_RESPONDER_INSTRUCTIONS, PLANNER_INSTRUCTIONS
 
 
@@ -34,11 +40,16 @@ class ToolPlan:
     requested_actions: list[dict[str, Any]] = field(default_factory=list)
     customer_id: int | None = None
     order_id: int | None = None
+    order_reference: OrderReference = field(default_factory=OrderReference)
     issue: str | None = None
     memory_key: str | None = None
     memory_value: str | None = None
-    pending_intent: str | None = None
-    pending_order_id: int | None = None
+    memory_candidate: MemoryWriteCandidate = field(default_factory=MemoryWriteCandidate)
+    missing_slots: list[str] = field(default_factory=list)
+    requires_replan_after_tools: bool = False
+    confidence: str = "low"
+    needs_user_clarification: bool = False
+    clarification_question: str | None = None
     follow_up_question: str | None = None
     steps: list[str] = field(default_factory=list)
     reasoning: str = ""
@@ -58,8 +69,12 @@ class StructuredChatReasoner(Reasoner):
             {
                 "active_customer_id": state_snapshot.get("active_customer_id"),
                 "active_order_id": state_snapshot.get("active_order_id"),
+                "order_reference": state_snapshot.get("order_reference"),
                 "known_issue": state_snapshot.get("issue"),
                 "observations": state_snapshot.get("tool_results", {}),
+                "missing_slots": state_snapshot.get("missing_slots", []),
+                "planner_feedback": state_snapshot.get("planner_feedback"),
+                "verification_decision": state_snapshot.get("verification_decision", {}),
                 "react_iterations": state_snapshot.get("react_iterations"),
                 "max_react_iterations": state_snapshot.get("max_react_iterations"),
             }
@@ -134,8 +149,9 @@ def _build_tool_plan(response: BaseMessage, state_snapshot: dict[str, Any]) -> T
     raw_tool_calls = getattr(response, "tool_calls", []) or []
     tool_calls = [_normalize_tool_call(tool_call) for tool_call in raw_tool_calls]
     requested_actions = [call for call in tool_calls if call["name"] in ACTION_TOOL_NAMES]
+    requires_replan_after_tools = any(call["name"] in CONTROL_TOOL_NAMES for call in tool_calls)
     customer_id = _planned_id(tool_calls, "customer_id", state_snapshot.get("active_customer_id"))
-    order_id = _planned_id(tool_calls, "order_id", state_snapshot.get("active_order_id"))
+    order_id = _planned_id(tool_calls, "order_id", None)
     _fill_missing_ids(tool_calls, customer_id=customer_id, order_id=order_id)
 
     issue = _first_str_arg(tool_calls, "issue")
@@ -154,6 +170,7 @@ def _build_tool_plan(response: BaseMessage, state_snapshot: dict[str, Any]) -> T
         issue=issue,
         memory_key=memory_key,
         memory_value=memory_value,
+        requires_replan_after_tools=requires_replan_after_tools,
         follow_up_question=None if tool_calls else DEFAULT_FOLLOW_UP_QUESTION,
         steps=steps,
         reasoning=reasoning,

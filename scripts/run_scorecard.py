@@ -159,6 +159,8 @@ def main() -> int:
                         "tool_results": result.tool_results,
                         "verified_facts": result.verified_facts,
                         "response_constraints": result.response_constraints,
+                        "missing_slots": result.missing_slots,
+                        "policy_errors": result.policy_errors,
                         "verification_errors": result.verification_errors,
                         "response": result.response,
                         "node_trace": node_trace,
@@ -238,9 +240,8 @@ def planner_iterations(node_trace: list[dict[str, Any]]) -> list[dict[str, Any]]
                     action.get("name", "")
                     for action in state.get("requested_actions", [])
                 ],
-                "pending_intent": state.get("pending_intent"),
-                "pending_order_id": state.get("pending_order_id"),
-                "pending_customer_id": state.get("pending_customer_id"),
+                "order_reference": state.get("order_reference"),
+                "missing_slots": state.get("missing_slots", []),
                 "follow_up_question": state.get("follow_up_question"),
             }
         )
@@ -255,25 +256,20 @@ def planner_tool_call_names(node_trace: list[dict[str, Any]]) -> list[str]:
                 call.get("name", "")
                 for call in item.get("state", {}).get("tool_calls", [])
             )
-        if item.get("node") == "verifier" and _verifier_resolved_pending_intent(item):
-            names.extend(
-                action.get("name", "")
-                for action in item.get("state", {}).get("requested_actions", [])
-            )
-    return names
+    return dedupe(names)
 
 
 def planner_requested_action_names(node_trace: list[dict[str, Any]]) -> list[str]:
     names = []
     for item in node_trace:
         if item.get("node") == "planner" or (
-            item.get("node") == "verifier" and _verifier_resolved_pending_intent(item)
+            item.get("node") == "verifier" and _verifier_approved_actions(item)
         ):
             names.extend(
                 action.get("name", "")
                 for action in item.get("state", {}).get("requested_actions", [])
             )
-    return names
+    return dedupe(names)
 
 
 def scorecard_order_id(
@@ -287,11 +283,6 @@ def scorecard_order_id(
             if order_id is not None:
                 return order_id
 
-    for item in reversed(node_trace):
-        order_id = _int_or_none(item.get("state", {}).get("pending_order_id"))
-        if order_id is not None:
-            return order_id
-
     return fallback_order_id
 
 
@@ -303,6 +294,7 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
     tool_calls = record.get("tool_calls", [])
     requested_actions = record.get("requested_actions", [])
     errors = record.get("verification_errors", [])
+    policy_errors = record.get("policy_errors", [])
     response = record.get("response", "")
 
     def require(condition: bool, message: str) -> None:
@@ -347,29 +339,14 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
         require(not _response_says_already_requested(response), "refund response should not say already requested")
         require(not errors, "refund should not ask for more info")
     elif number == 5:
-        require("request_log_complaint" in requested_actions, "complaint should request complaint action")
-        require(
-            tool_results.get("complaint", {}).get("order_id") == 2222,
-            "complaint should be logged for order 2222",
-        )
-        require(
-            verified_facts.get("complaint_logged", {}).get("order_id") == 2222,
-            "complaint response should be grounded to order 2222",
-        )
-        require(
-            _response_mentions(response, "complaint", "2222"),
-            "complaint response should mention the grounded complaint and order",
-        )
-        require(_has_successful_action_style(response), "complaint response should use 2-3 concise sentences")
-        require(_has_empathy_phrase(response), "complaint response should include brief empathy")
-        require(
-            not _response_makes_unsupported_future_promise(response),
-            "complaint response should not promise unsupported future handling",
-        )
+        require("request_log_complaint" not in requested_actions, "complaint without issue should not request complaint action")
+        require("complaint" not in tool_results, "complaint without issue should not be logged")
+        require("complaint_issue" in errors or "complaint_issue" in record.get("missing_slots", []), "complaint should ask for issue details")
     elif number == 6:
+        require("order_lookup" in tool_calls, "conditional refund should look up order first")
         require(
-            _ordered_contains(tool_calls, ["order_lookup", "request_refund"]),
-            "conditional refund should look up before refund",
+            "request_refund" in requested_actions,
+            "conditional refund should request refund action after verification",
         )
         require(
             tool_results.get("refund", {}).get("status") == "refund_requested",
@@ -401,7 +378,11 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
         )
     elif number == 7:
         require("little more detail" not in response.lower(), "cancel should not ask for more info when active order is known")
-        require(errors, "cancel should return a verifier policy error")
+        require(
+            policy_errors
+            and policy_errors[0].get("error_code") == "ORDER_NOT_CANCELLABLE",
+            "cancel should return a verifier policy error",
+        )
     elif number == 8:
         require("memories" in tool_results, "memory read should include memories")
         require("complaints" in tool_results, "memory read should include complaints")
@@ -427,32 +408,15 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
         )
         require(not errors, "memory write should not ask for more info")
     elif number == 10:
-        require("request_log_complaint" in requested_actions, "personalization should log complaint")
-        require(tool_results.get("complaint", {}).get("issue"), "personalization should create complaint")
-        require(
-            verified_facts.get("complaint_logged", {}).get("issue"),
-            "personalization response should be grounded to the complaint issue",
-        )
-        if tool_results.get("issue_patterns"):
-            require(
-                verified_facts.get("issue_patterns", {}).get("repeated_late_delivery") is True,
-                "personalization should ground repeated late-delivery pattern",
-            )
-            require(
-                _response_mentions(response, "late"),
-                "personalized response should mention the grounded late-delivery issue",
-            )
-        require(
-            _has_successful_action_style(response),
-            "personalized complaint response should use 2-3 concise sentences",
-        )
-        require(_has_empathy_phrase(response), "personalized complaint response should include brief empathy")
-        require(
-            not _response_makes_unsupported_future_promise(response),
-            "personalized complaint response should not promise unsupported future handling",
-        )
+        require("request_log_complaint" not in requested_actions, "ambiguous order complaint should not log complaint")
+        require("complaint" not in tool_results, "ambiguous order complaint should not create complaint")
+        require(errors, "ambiguous order complaint should ask which order")
     elif number == 11:
-        require(errors == ["Order 0 does not exist."], "invalid refund should be blocked by verifier")
+        require(
+            policy_errors
+            and policy_errors[0].get("error_code") == "ORDER_NOT_FOUND",
+            "invalid refund should be blocked by verifier",
+        )
 
     return failures
 
@@ -526,10 +490,18 @@ def _int_or_none(value: Any) -> int | None:
     return None
 
 
-def _verifier_resolved_pending_intent(item: dict[str, Any]) -> bool:
-    return str(item.get("state", {}).get("reasoning") or "").startswith(
-        "Resolved pending intent"
-    )
+def dedupe(values: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for value in values:
+        if value and value not in seen:
+            result.append(value)
+            seen.add(value)
+    return result
+
+
+def _verifier_approved_actions(item: dict[str, Any]) -> bool:
+    return item.get("state", {}).get("verifier_decision") == "proceed_to_action"
 
 
 def _ordered_contains(values: list[str], expected: list[str]) -> bool:
@@ -550,8 +522,7 @@ def log_node_trace(quiet: bool, node_trace: list[dict[str, Any]]) -> None:
         if node == "planner":
             print(
                 f"    customer={state.get('active_customer_id')} order={state.get('active_order_id')} "
-                f"pending_intent={state.get('pending_intent')} "
-                f"pending_order={state.get('pending_order_id')} "
+                f"order_reference={state.get('order_reference')} "
                 f"follow_up={state.get('follow_up_question')}",
                 file=sys.stderr,
                 flush=True,
@@ -577,6 +548,8 @@ def log_node_trace(quiet: bool, node_trace: list[dict[str, Any]]) -> None:
         elif node == "verifier":
             print(
                 f"    errors={state.get('verification_errors', [])} "
+                f"missing={state.get('missing_slots', [])} "
+                f"policy_errors={state.get('policy_errors', [])} "
                 f"tool_keys={state.get('tool_result_keys', [])}",
                 file=sys.stderr,
                 flush=True,

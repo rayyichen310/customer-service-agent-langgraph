@@ -147,4 +147,8 @@ def test_read_memory_and_issue_patterns() -> None:
     patterns = repository.summarize_issue_patterns(1)
 
     assert len(memories) >= 2
-    assert patterns["repeated_late_delivery"] is True
+    assert patterns["issue_counts"] == {
+        "delivery was late last month": 1,
+        "late delivery again": 1,
+    }
+    assert patterns["repeated_issues"] == {}

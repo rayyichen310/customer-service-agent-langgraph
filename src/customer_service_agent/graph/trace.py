@@ -8,13 +8,16 @@ def summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, A
         return {
             "active_customer_id": update.get("active_customer_id"),
             "active_order_id": update.get("active_order_id"),
+            "current_turn_order_id": update.get("current_turn_order_id"),
+            "order_reference": update.get("order_reference"),
             "issue": update.get("issue"),
             "memory_key": update.get("memory_key"),
             "memory_value": update.get("memory_value"),
-            "pending_intent": update.get("pending_intent"),
-            "pending_order_id": update.get("pending_order_id"),
+            "memory_candidate": update.get("memory_candidate"),
+            "missing_slots": update.get("missing_slots", []),
             "tool_calls": update.get("tool_calls", []),
             "requested_actions": update.get("requested_actions", []),
+            "requires_replan_after_tools": update.get("requires_replan_after_tools", False),
             "follow_up_question": update.get("follow_up_question"),
             "plan_steps": update.get("plan_steps", []),
             "reasoning": update.get("reasoning"),
@@ -37,9 +40,11 @@ def summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, A
         tool_results = update.get("tool_results", {})
         return {
             "verifier_decision": update.get("verifier_decision"),
+            "verification_decision": update.get("verification_decision", {}),
+            "missing_slots": update.get("missing_slots", []),
+            "policy_errors": update.get("policy_errors", []),
             "verification_errors": update.get("verification_errors", []),
             "tool_result_keys": list(tool_results.keys()),
-            "pending_order_id": update.get("pending_order_id"),
             "requested_actions": update.get("requested_actions", []),
             "reasoning": update.get("reasoning"),
         }

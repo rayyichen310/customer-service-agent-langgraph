@@ -15,6 +15,9 @@ ACTION_TOOL_NAMES = {
     "request_log_complaint",
     "request_write_memory",
 }
+CONTROL_TOOL_NAMES = {
+    "continue_after_read",
+}
 
 
 @tool("order_lookup")
@@ -47,6 +50,12 @@ def summarize_issue_patterns(customer_id: int) -> str:
     return "schema only"
 
 
+@tool("continue_after_read")
+def continue_after_read() -> str:
+    """Mark that planning should continue after requested read tools return observations."""
+    return "schema only"
+
+
 @tool("request_refund")
 def request_refund(order_id: int) -> str:
     """Request a refund action for an order. Execution is gated by verifier policy."""
@@ -63,7 +72,7 @@ def request_cancel_order(order_id: int) -> str:
 def request_log_complaint(
     customer_id: int | None = None,
     order_id: int | None = None,
-    issue: str = "customer requested to file a complaint",
+    issue: str = "",
 ) -> str:
     """Request logging a customer complaint. Execution is gated by verifier policy."""
     return "schema only"
@@ -81,6 +90,7 @@ PLANNER_TOOLS = [
     read_customer_memory,
     list_customer_complaints,
     summarize_issue_patterns,
+    continue_after_read,
     request_refund,
     request_cancel_order,
     request_log_complaint,

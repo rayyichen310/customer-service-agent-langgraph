@@ -10,10 +10,8 @@ from customer_service_agent.models import AgentState, ChatResponse
 from customer_service_agent.reasoning import ResponseContext
 from customer_service_agent.graph.actions import execute_requested_actions
 from customer_service_agent.graph.grounding import build_response_grounding
-from customer_service_agent.graph.planning import (
-    apply_pending_intent_to_plan,
-    requested_order_mutation,
-)
+from customer_service_agent.graph.planning import prepare_plan
+from customer_service_agent.graph.tools import ACTION_TOOL_NAMES, ORDER_TOOL_NAMES
 from customer_service_agent.graph.policy import prefer_explicit_int, verify_policy
 from customer_service_agent.graph.response_style import polish_customer_response
 from customer_service_agent.graph.trace import summarize_node_update
@@ -29,45 +27,56 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
         state_snapshot = {
             "active_customer_id": state.get("active_customer_id"),
             "active_order_id": state.get("active_order_id"),
+            "order_reference": state.get("order_reference"),
             "issue": state.get("issue"),
             "memory_key": state.get("memory_key"),
             "memory_value": state.get("memory_value"),
-            "pending_intent": state.get("pending_intent"),
-            "pending_order_id": state.get("pending_order_id"),
             "tool_results": state.get("tool_results", {}),
+            "missing_slots": state.get("missing_slots", []),
+            "planner_feedback": (state.get("verification_decision") or {}).get(
+                "planner_feedback"
+            ),
+            "verification_decision": state.get("verification_decision", {}),
+            "previous_turn_order_context": state.get("last_turn_order_context", False),
             "react_iterations": react_iterations,
             "max_react_iterations": state.get("max_react_iterations") or max_react_iterations,
         }
         plan = reasoner.plan(str(last_message), state_snapshot)
-        plan = apply_pending_intent_to_plan(plan, str(last_message), state_snapshot)
+        plan = prepare_plan(plan, str(last_message), state_snapshot)
         next_customer_id = (
             plan.customer_id if plan.customer_id is not None else state.get("active_customer_id")
         )
-        next_order_id = plan.order_id if plan.order_id is not None else state.get("active_order_id")
-        pending_intent = plan.pending_intent
-        pending_order_id = (
-            plan.pending_order_id if plan.pending_order_id is not None else next_order_id
+        next_order_id = (
+            plan.order_reference.order_id
+            if plan.order_reference.confidence == "high"
+            and plan.order_reference.order_id is not None
+            else state.get("active_order_id")
         )
         return {
             "plan_steps": plan.steps,
             "reasoning": plan.reasoning,
             "active_customer_id": next_customer_id,
             "active_order_id": next_order_id,
+            "current_turn_order_id": plan.order_reference.order_id,
+            "order_reference": plan.order_reference.model_dump(),
             "issue": plan.issue,
             "memory_key": plan.memory_key,
             "memory_value": plan.memory_value,
-            "pending_intent": pending_intent,
-            "pending_order_id": pending_order_id if pending_intent else None,
+            "memory_candidate": plan.memory_candidate.model_dump(),
+            "missing_slots": plan.missing_slots,
             "tool_calls": plan.tool_calls,
             "requested_actions": plan.requested_actions,
+            "requires_replan_after_tools": plan.requires_replan_after_tools,
             "follow_up_question": plan.follow_up_question,
             "tool_results": state.get("tool_results", {}),
             "verifier_decision": None,
+            "verification_decision": {},
             "verification_errors": [],
             "verified_facts": {},
             "response_constraints": [],
             "react_iterations": react_iterations,
             "max_react_iterations": state.get("max_react_iterations") or max_react_iterations,
+            "last_turn_order_context": _plan_has_order_context(plan),
             "long_term_memory": [],
             "final_response": None,
         }
@@ -91,7 +100,7 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
             args = tool_call.get("args", {})
 
             if name == "order_lookup":
-                order_id = prefer_explicit_int(args.get("order_id"), active_order_id)
+                order_id = prefer_explicit_int(args.get("order_id"), state.get("current_turn_order_id"))
                 if order_id is not None:
                     active_order_id = order_id
                     order = repository.get_order(order_id)
@@ -152,6 +161,7 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
         verified_facts, response_constraints = build_response_grounding(
             state.get("tool_results", {}),
             state.get("verification_errors", []),
+            state.get("verification_decision", {}),
         )
         if state.get("verification_errors"):
             response = polish_customer_response(state["verification_errors"][0], verified_facts)
@@ -219,7 +229,7 @@ def _route_after_verifier(state: AgentState) -> str:
     decision = state.get("verifier_decision")
     if decision == "replan":
         return "planner"
-    if decision == "approved":
+    if decision == "proceed_to_action":
         return "actions"
     return "respond"
 
@@ -227,16 +237,13 @@ def _route_after_verifier(state: AgentState) -> str:
 def _needs_replan_after_read_tools(state: AgentState) -> bool:
     if state.get("follow_up_question"):
         return False
-    if state.get("pending_intent") in {"refund", "cancel"}:
-        return False
     if int(state.get("react_iterations") or 0) >= int(
         state.get("max_react_iterations") or DEFAULT_MAX_REACT_ITERATIONS
     ):
         return False
-
-    last_message = state["messages"][-1].content if state.get("messages") else ""
-    if not requested_order_mutation(str(last_message)):
+    if not state.get("requires_replan_after_tools"):
         return False
+
     if state.get("requested_actions"):
         return False
 
@@ -244,6 +251,15 @@ def _needs_replan_after_read_tools(state: AgentState) -> bool:
         call.get("name") == "order_lookup" for call in state.get("tool_calls", [])
     )
     return called_order_lookup and bool(state.get("tool_results", {}).get("order"))
+
+
+def _plan_has_order_context(plan) -> bool:
+    if plan.order_reference.order_id is not None and plan.order_reference.confidence == "high":
+        return True
+    return any(
+        call.get("name") in ORDER_TOOL_NAMES or call.get("name") in ACTION_TOOL_NAMES
+        for call in [*plan.tool_calls, *plan.requested_actions]
+    )
 
 
 class CustomerServiceAgent:
@@ -307,12 +323,17 @@ def _new_turn_state(
         "issue": None,
         "memory_key": None,
         "memory_value": None,
-        "pending_intent": None,
-        "pending_order_id": None,
+        "current_turn_order_id": None,
+        "order_reference": {"order_id": None, "source": "none", "confidence": "low"},
+        "memory_candidate": {},
+        "missing_slots": [],
         "tool_calls": [],
         "requested_actions": [],
+        "requires_replan_after_tools": False,
         "follow_up_question": None,
         "tool_results": {},
+        "verification_decision": {},
+        "policy_errors": [],
         "verification_errors": [],
         "verified_facts": {},
         "response_constraints": [],
@@ -337,5 +358,7 @@ def _chat_response(thread_id: str, result: dict[str, Any]) -> ChatResponse:
         verified_facts=result.get("verified_facts", {}),
         response_constraints=result.get("response_constraints", []),
         verifier_decision=result.get("verifier_decision"),
+        missing_slots=result.get("missing_slots", []),
+        policy_errors=result.get("policy_errors", []),
         verification_errors=result.get("verification_errors", []),
     )

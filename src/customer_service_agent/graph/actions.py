@@ -13,7 +13,7 @@ ORDER_MUTATION_ACTIONS = {
 
 def execute_requested_actions(state: dict[str, Any], repository) -> dict[str, Any]:
     tool_results = dict(state.get("tool_results", {}))
-    if state.get("verifier_decision") != "approved":
+    if state.get("verifier_decision") != "proceed_to_action":
         return tool_results
 
     handlers = {
@@ -67,8 +67,8 @@ def _request_log_complaint(
 ) -> None:
     customer_id = _customer_id(args, state)
     order_id = _order_id(args, state)
-    issue = args.get("issue") or state.get("issue") or "customer requested to file a complaint"
-    if customer_id is not None:
+    issue = args.get("issue") or state.get("issue")
+    if customer_id is not None and issue:
         tool_results["complaint"] = repository.log_complaint(
             customer_id=customer_id,
             order_id=order_id,
@@ -99,4 +99,4 @@ def _customer_id(args: dict[str, Any], state: dict[str, Any]) -> int | None:
 
 
 def _order_id(args: dict[str, Any], state: dict[str, Any]) -> int | None:
-    return prefer_explicit_int(args.get("order_id"), state.get("active_order_id"))
+    return prefer_explicit_int(args.get("order_id"), state.get("current_turn_order_id"))

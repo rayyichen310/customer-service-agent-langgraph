@@ -6,19 +6,30 @@ from typing import Any
 def build_response_grounding(
     tool_results: dict[str, Any],
     verification_errors: list[str],
+    verification_decision: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
-    verified_facts = build_verified_facts(tool_results, verification_errors)
+    verified_facts = build_verified_facts(
+        tool_results,
+        verification_errors,
+        verification_decision or {},
+    )
     return verified_facts, build_response_constraints(verified_facts, verification_errors)
 
 
 def build_verified_facts(
     tool_results: dict[str, Any],
     verification_errors: list[str],
+    verification_decision: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     verified_facts: dict[str, Any] = {}
+    verification_decision = verification_decision or {}
 
     if verification_errors:
         verified_facts["verification_errors"] = list(verification_errors)
+
+    policy_errors = verification_decision.get("policy_errors") or []
+    if policy_errors:
+        verified_facts["policy_errors"] = list(policy_errors)
 
     order = tool_results.get("order")
     if order:
@@ -103,7 +114,7 @@ def build_verified_facts(
         verified_facts["issue_patterns"] = {
             "total_complaints": issue_patterns.get("total_complaints"),
             "issue_counts": issue_patterns.get("issue_counts", {}),
-            "repeated_late_delivery": issue_patterns.get("repeated_late_delivery"),
+            "repeated_issues": issue_patterns.get("repeated_issues", {}),
         }
 
     return verified_facts
@@ -117,6 +128,13 @@ def build_response_constraints(
     if verification_errors:
         constraints.append(
             "For verifier errors, communicate the first error without adding unsupported action claims."
+        )
+    if "policy_errors" in verified_facts:
+        constraints.append(
+            "For policy_errors, explain the blocked action in natural customer-service wording using only error_code, order_id, customer_id, current_status, reason, and verified order facts."
+        )
+        constraints.append(
+            "For blocked policy errors, do not claim the blocked action succeeded and do not promise follow-up, escalation, investigation, or future handling unless verified_facts explicitly support it."
         )
     if "refund_request" in verified_facts:
         constraints.append(
@@ -143,8 +161,7 @@ def build_response_constraints(
         )
     if "issue_patterns" in verified_facts:
         constraints.append(
-            "If repeated_late_delivery is true, mention the repeated late-delivery pattern; "
-            "otherwise do not mention repeated late-delivery history."
+            "When discussing issue patterns, use only total_complaints, issue_counts, and repeated_issues from verified_facts."
         )
     if "customer_memories" in verified_facts or "customer_complaints" in verified_facts:
         constraints.append(

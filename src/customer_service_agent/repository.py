@@ -149,18 +149,11 @@ class CustomerServiceRepository:
 
     def summarize_issue_patterns(self, customer_id: int) -> dict[str, Any]:
         complaints = self.list_complaints(customer_id)
-        normalized = []
-        for complaint in complaints:
-            issue = complaint["issue"].lower()
-            if "late" in issue or "delay" in issue:
-                normalized.append("late_delivery")
-            elif "refund" in issue:
-                normalized.append("refund")
-            else:
-                normalized.append("other")
-        counts = Counter(normalized)
+        counts = Counter(complaint["issue"].strip().lower() for complaint in complaints)
         return {
             "total_complaints": len(complaints),
             "issue_counts": dict(counts),
-            "repeated_late_delivery": counts["late_delivery"] >= 2,
+            "repeated_issues": {
+                issue: count for issue, count in counts.items() if count > 1
+            },
         }

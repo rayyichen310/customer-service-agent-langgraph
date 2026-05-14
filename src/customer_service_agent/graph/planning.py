@@ -3,11 +3,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from customer_service_agent.graph.tools import ACTION_TOOL_NAMES
+from customer_service_agent.graph.tools import ACTION_TOOL_NAMES, CONTROL_TOOL_NAMES
+from customer_service_agent.models import MemoryWriteCandidate, OrderReference
 from customer_service_agent.reasoning import ToolPlan
 
 
-def apply_pending_intent_to_plan(
+def prepare_plan(
     plan,
     user_message: str,
     state_snapshot: dict[str, Any],
@@ -15,63 +16,29 @@ def apply_pending_intent_to_plan(
     if plan is None:
         plan = empty_tool_plan()
 
-    pending_intent = pending_intent_from_context(plan, user_message)
-    if not pending_intent:
-        return plan
+    plan.order_reference = infer_order_reference(user_message, plan, state_snapshot)
+    if plan.order_reference.order_id is not None and plan.order_id is None:
+        plan.order_id = plan.order_reference.order_id
 
-    tool_results = state_snapshot.get("tool_results", {})
-    order = tool_results.get("order")
-    plan.pending_intent = pending_intent
-    strip_planned_mutation_actions(plan)
+    plan.issue = plan.issue or first_str_arg(plan.requested_actions, "issue") or first_str_arg(
+        plan.tool_calls, "issue"
+    )
+    plan.memory_candidate = normalize_memory_candidate(plan)
+    if plan.memory_candidate.should_write:
+        plan.memory_key = plan.memory_key or plan.memory_candidate.key
+        plan.memory_value = plan.memory_value or plan.memory_candidate.value
 
-    if pending_intent in {"refund", "cancel"}:
-        order_id = pending_order_id(user_message, plan, state_snapshot)
-        if order:
-            order_id = order["order_id"]
-        plan.pending_order_id = order_id
-        if plan.order_id is None:
-            plan.order_id = order_id
-        if not plan.tool_calls and not order and order_id is not None:
-            call = {
-                "name": "order_lookup",
-                "args": {"order_id": order_id},
-                "id": "pending-order-lookup",
-            }
-            plan.tool_calls = [call]
-            plan.requested_actions = []
-            plan.steps = [call["name"]]
-            plan.reasoning = (
-                f"Resolved pending intent {pending_intent} into order_lookup before transaction verification."
-            )
-        if not plan.tool_calls:
-            clear_follow_up(plan)
-        return plan
+    has_control_replan = any(call.get("name") in CONTROL_TOOL_NAMES for call in plan.tool_calls)
+    plan.requested_actions = normalize_requested_actions(plan)
+    plan.tool_calls = normalize_read_tools(plan)
+    plan.requires_replan_after_tools = plan.requires_replan_after_tools or has_control_replan
+    plan.steps = [call["name"] for call in plan.tool_calls] + [
+        action["name"] for action in plan.requested_actions
+    ]
+    plan.missing_slots = missing_slots_for_plan(plan)
 
-    if pending_intent == "memory_write":
-        key = plan.memory_key
-        value = plan.memory_value
-        if not key or not value:
-            key, value = memory_preference(user_message)
-        plan.memory_key = key
-        plan.memory_value = value
-        plan.pending_order_id = None
-        if not plan.tool_calls:
-            clear_follow_up(
-                plan,
-                "Resolved pending intent memory_write for verifier continuation.",
-            )
-        return plan
-
-    if pending_intent == "complaint":
-        order_id = pending_order_id(user_message, plan, state_snapshot)
-        plan.pending_order_id = order_id
-        if plan.order_id is None:
-            plan.order_id = order_id
-        if not plan.issue:
-            plan.issue = complaint_issue(user_message)
-        if not plan.tool_calls:
-            clear_follow_up(plan, "Resolved pending intent complaint for verifier continuation.")
-        return plan
+    if plan.needs_user_clarification or plan.clarification_question:
+        plan.follow_up_question = plan.clarification_question
 
     return plan
 
@@ -82,97 +49,142 @@ def empty_tool_plan() -> ToolPlan:
     )
 
 
-def pending_intent_from_context(plan, user_message: str) -> str | None:
-    if plan.pending_intent in {"refund", "cancel", "complaint", "memory_write"}:
-        return str(plan.pending_intent)
-
-    action_names = {action.get("name") for action in plan.requested_actions}
-    tool_names = {call.get("name") for call in plan.tool_calls}
-    requested_mutation = requested_order_mutation(user_message)
-    if "request_refund" in action_names or requested_mutation == "refund":
-        return "refund"
-    if "request_cancel_order" in action_names or requested_mutation == "cancel":
-        return "cancel"
-    if "request_write_memory" in action_names or requested_memory_write(user_message):
-        return "memory_write"
-    if (
-        "request_log_complaint" in action_names
-        or "request_log_complaint" in tool_names
-        or requested_complaint(user_message)
-    ):
-        return "complaint"
-    return None
-
-
-def strip_planned_mutation_actions(plan) -> None:
-    plan.tool_calls = [
-        call for call in plan.tool_calls if call.get("name") not in ACTION_TOOL_NAMES
+def normalize_requested_actions(
+    plan: ToolPlan,
+) -> list[dict[str, Any]]:
+    raw_actions = [
+        *plan.requested_actions,
+        *[call for call in plan.tool_calls if call.get("name") in ACTION_TOOL_NAMES],
     ]
-    plan.requested_actions = []
-    plan.steps = [str(call.get("name") or "") for call in plan.tool_calls]
+    actions_by_name = {str(action.get("name")): dict(action) for action in raw_actions}
+
+    normalized: list[dict[str, Any]] = []
+    for action in actions_by_name.values():
+        name = str(action.get("name") or "")
+        args = dict(action.get("args") or {})
+        if name in {"request_refund", "request_cancel_order", "request_log_complaint"}:
+            if args.get("order_id") is None and plan.order_reference.order_id is not None:
+                args["order_id"] = plan.order_reference.order_id
+        if name == "request_log_complaint":
+            if args.get("customer_id") is None and plan.customer_id is not None:
+                args["customer_id"] = plan.customer_id
+            if not args.get("issue") and plan.issue:
+                args["issue"] = plan.issue
+        if name == "request_write_memory":
+            if args.get("customer_id") is None and plan.customer_id is not None:
+                args["customer_id"] = plan.customer_id
+            if not args.get("key") and plan.memory_key:
+                args["key"] = plan.memory_key
+            if not args.get("value") and plan.memory_value:
+                args["value"] = plan.memory_value
+        normalized.append({"name": name, "args": args, "id": action.get("id")})
+    return normalized
 
 
-def clear_follow_up(plan, reasoning: str | None = None) -> None:
-    plan.follow_up_question = None
-    if reasoning:
-        plan.reasoning = reasoning
+def normalize_read_tools(plan: ToolPlan) -> list[dict[str, Any]]:
+    read_tools = [
+        call
+        for call in plan.tool_calls
+        if call.get("name") not in ACTION_TOOL_NAMES
+        and call.get("name") not in CONTROL_TOOL_NAMES
+    ]
+    for call in read_tools:
+        args = call.setdefault("args", {})
+        if call.get("name") == "order_lookup" and args.get("order_id") is None:
+            args["order_id"] = plan.order_reference.order_id
+    return read_tools
 
 
-def pending_order_id(user_message: str, plan, state_snapshot: dict[str, Any]) -> int | None:
-    return first_not_none(
+def infer_order_reference(
+    user_message: str,
+    plan: ToolPlan,
+    state_snapshot: dict[str, Any],
+) -> OrderReference:
+    explicit_order_id = first_not_none(
         int_from_message(user_message),
         plan.order_id,
-        state_snapshot.get("pending_order_id"),
-        state_snapshot.get("active_order_id"),
+        first_int_arg(plan.tool_calls, "order_id"),
+        first_int_arg(plan.requested_actions, "order_id"),
     )
+    if explicit_order_id is not None:
+        return OrderReference(order_id=explicit_order_id, source="explicit", confidence="high")
+
+    active_order_id = state_snapshot.get("active_order_id")
+    if active_order_id is None:
+        return OrderReference(source="none", confidence="low")
+
+    if has_pronoun_reference(user_message):
+        confidence = "high" if state_snapshot.get("previous_turn_order_context") else "low"
+        return OrderReference(order_id=active_order_id, source="pronoun", confidence=confidence)
+
+    if has_weak_order_reference(user_message):
+        confidence = "medium" if state_snapshot.get("previous_turn_order_context") else "low"
+        return OrderReference(
+            order_id=active_order_id,
+            source="active_context",
+            confidence=confidence,
+        )
+
+    return OrderReference(source="none", confidence="low")
 
 
-def requested_order_mutation(message: str) -> str | None:
+def normalize_memory_candidate(plan: ToolPlan) -> MemoryWriteCandidate:
+    candidate = plan.memory_candidate
+    if candidate.should_write or candidate.memory_type != "unclear":
+        return candidate
+
+    key = plan.memory_key or first_str_arg(plan.requested_actions, "key") or first_str_arg(
+        plan.tool_calls, "key"
+    )
+    value = plan.memory_value or first_str_arg(plan.requested_actions, "value") or first_str_arg(
+        plan.tool_calls, "value"
+    )
+    if key and value:
+        return MemoryWriteCandidate(
+            should_write=True,
+            memory_type="preference",
+            key=key,
+            value=value,
+            reason="Planner supplied a durable memory key and value.",
+        )
+    return candidate
+
+
+def missing_slots_for_plan(plan: ToolPlan) -> list[str]:
+    missing: list[str] = list(plan.missing_slots)
+    action_names = {action.get("name") for action in plan.requested_actions}
+    if action_names & {"request_refund", "request_cancel_order"}:
+        if plan.customer_id is None:
+            missing.append("customer_id")
+        if plan.order_reference.order_id is None or plan.order_reference.confidence != "high":
+            missing.append("order_id")
+        missing.extend(["order_status", "order_customer_id"])
+    if "request_log_complaint" in action_names:
+        if plan.customer_id is None:
+            missing.append("customer_id")
+        if plan.order_reference.order_id is None or plan.order_reference.confidence != "high":
+            missing.append("order_id")
+        if not plan.issue:
+            missing.append("complaint_issue")
+    if "request_write_memory" in action_names:
+        if plan.customer_id is None:
+            missing.append("customer_id")
+        if not plan.memory_candidate.should_write:
+            missing.append("long_term_write_allowed")
+        if not plan.memory_key:
+            missing.append("memory_key")
+        if not plan.memory_value:
+            missing.append("memory_value")
+    return dedupe(missing)
+
+
+def has_pronoun_reference(message: str) -> bool:
+    return bool(re.search(r"\b(it|that|this)\b", message.lower()))
+
+
+def has_weak_order_reference(message: str) -> bool:
     normalized = message.lower()
-    if "refund" in normalized and (
-        "order" in normalized
-        or "refund it" in normalized
-        or normalized.strip().startswith("refund")
-    ):
-        return "refund"
-    if "cancel" in normalized or "cancellation" in normalized:
-        return "cancel"
-    return None
-
-
-def requested_memory_write(message: str) -> bool:
-    normalized = message.lower()
-    return "remember" in normalized or "preference" in normalized
-
-
-def requested_complaint(message: str) -> bool:
-    normalized = message.lower()
-    complaint_words = {"complain", "complaint", "late", "damaged", "broken"}
-    return any(word in normalized for word in complaint_words)
-
-
-def memory_preference(message: str) -> tuple[str | None, str | None]:
-    normalized = message.lower()
-    if "refund" in normalized:
-        return "refund_preference", "prefers refunds"
-    if "email" in normalized:
-        return "contact_preference", "prefers email"
-    if "remember" in normalized:
-        value = re.sub(r"^\s*remember\s+", "", message, flags=re.IGNORECASE).strip()
-        if value:
-            return "customer_preference", value
-    return None, None
-
-
-def complaint_issue(message: str) -> str:
-    normalized = message.lower()
-    if "late" in normalized:
-        return "Order is late again" if "again" in normalized else "Order is late"
-    if "damaged" in normalized:
-        return "Package damaged"
-    if "broken" in normalized:
-        return "Item is broken"
-    return "customer requested to file a complaint"
+    return "my order" in normalized or "this order" in normalized or "the order" in normalized
 
 
 def int_from_message(message: str) -> int | None:
@@ -182,8 +194,42 @@ def int_from_message(message: str) -> int | None:
     return int(match.group(0))
 
 
+def first_int_arg(calls: list[dict[str, Any]], key: str) -> int | None:
+    for call in calls:
+        value = int_or_none((call.get("args") or {}).get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def first_str_arg(calls: list[dict[str, Any]], key: str) -> str | None:
+    for call in calls:
+        value = (call.get("args") or {}).get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def int_or_none(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
 def first_not_none(*values):
     for value in values:
         if value is not None:
             return value
     return None
+
+
+def dedupe(values: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for value in values:
+        if value not in seen:
+            result.append(value)
+            seen.add(value)
+    return result
