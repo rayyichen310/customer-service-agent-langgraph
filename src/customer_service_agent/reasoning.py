@@ -89,12 +89,11 @@ class StructuredChatReasoner(Reasoner):
         return _build_tool_plan(response, state_snapshot)
 
     def respond(self, context: ResponseContext) -> str:
-        if context.verification_errors:
-            return context.verification_errors[0]
         payload = {
             "verified_facts": context.verified_facts,
             "response_constraints": context.response_constraints,
             "tool_results": context.tool_results,
+            "verification_errors": context.verification_errors,
             "long_term_memory": context.long_term_memory[:5],
             "active_customer_id": context.active_customer_id,
             "active_order_id": context.active_order_id,

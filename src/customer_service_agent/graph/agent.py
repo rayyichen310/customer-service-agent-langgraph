@@ -163,15 +163,6 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
             state.get("verification_errors", []),
             state.get("verification_decision", {}),
         )
-        if state.get("verification_errors"):
-            response = polish_customer_response(state["verification_errors"][0], verified_facts)
-            return {
-                "messages": [("assistant", response)],
-                "final_response": response,
-                "verified_facts": verified_facts,
-                "response_constraints": response_constraints,
-            }
-
         response = reasoner.respond(
             ResponseContext(
                 user_message=str(last_message),

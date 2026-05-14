@@ -539,6 +539,32 @@ class MemoryCandidateReasoner:
         return "Done."
 
 
+class WarmClarificationReasoner:
+    def __init__(self) -> None:
+        self.response_contexts: list[ResponseContext] = []
+
+    def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
+        action = {
+            "name": "request_log_complaint",
+            "args": {
+                "customer_id": state_snapshot.get("active_customer_id"),
+                "order_id": 2222,
+            },
+            "id": "complaint-1",
+        }
+        return ToolPlan(
+            tool_calls=[action],
+            requested_actions=[action],
+            customer_id=state_snapshot.get("active_customer_id"),
+            order_id=2222,
+            steps=["request_log_complaint"],
+        )
+
+    def respond(self, context: ResponseContext) -> str:
+        self.response_contexts.append(context)
+        return "Could you tell me what issue you'd like to report for order 2222?"
+
+
 class ActionRequestReasoner:
     def __init__(
         self,
@@ -931,6 +957,26 @@ def test_complaint_missing_issue_asks_before_logging() -> None:
     assert "complaint_issue" in response.missing_slots
     assert verifier_updates[-1]["verification_decision"]["decision"] == "ask_user"
     assert verifier_updates[-1]["verification_decision"]["missing_slots"] == ["complaint_issue"]
+
+
+def test_ask_user_response_routes_through_responder() -> None:
+    repository = build_repository()
+    reasoner = WarmClarificationReasoner()
+    agent = CustomerServiceAgent(reasoner, repository)
+
+    response, _ = agent.trace(
+        "warm-clarification",
+        "I want to complain about order 2222",
+        customer_id=7,
+    )
+
+    assert reasoner.response_contexts
+    assert reasoner.response_contexts[-1].verification_errors == [
+        "What issue would you like to report for order 2222?"
+    ]
+    assert response.verifier_decision == "ask_user"
+    assert response.response == "Could you tell me what issue you'd like to report for order 2222?"
+    assert "complaint" not in response.tool_results
 
 
 def test_complaint_with_issue_logs_complaint() -> None:
