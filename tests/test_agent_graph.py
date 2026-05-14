@@ -808,11 +808,7 @@ def test_refund_owned_delivered_order_routes_success_through_responder() -> None
         "status": "refund_requested",
         "created_this_turn": True,
     }
-    constraints = " ".join(response.response_constraints)
-    assert "current-turn refund" in constraints
-    assert "raw status values" in constraints
-    assert "Do not invent refund status" not in constraints
-    assert "Do not promise future handling" not in constraints
+    assert response.response_constraints == []
     assert response.response == "LLM guessed refund response"
     assert repository.get_order(5678)["status"] == "refund_requested"
 
@@ -834,7 +830,7 @@ def test_explicit_memory_write_candidate_routes_success_through_responder() -> N
     assert response.tool_results["memory_write"]["key"] == "refund_preference"
     assert response.verified_facts["memory_written"]["key"] == "refund_preference"
     assert response.verified_facts["memory_written"]["created_this_turn"] is True
-    assert "saved key or value" in " ".join(response.response_constraints)
+    assert response.response_constraints == []
     assert response.response == "LLM guessed memory response"
     assert len(repository.read_memories(7, key="refund_preference")) == 1
 
@@ -1125,8 +1121,8 @@ def test_successful_mutations_use_responder_instead_of_deterministic_templates()
     assert cancel_response.response != "Cancellation request submitted for order 2468."
     assert complaint_response.response != "Complaint logged for order 7890."
     assert memory_response.response != "Memory updated: contact_preference."
-    assert "current-turn cancellation" in " ".join(cancel_response.response_constraints)
-    assert "brief empathy phrase" in " ".join(complaint_response.response_constraints)
+    assert cancel_response.response_constraints == []
+    assert complaint_response.response_constraints == []
 
 
 def test_profile_query_does_not_include_stale_order_result() -> None:
