@@ -60,6 +60,23 @@ class CustomerMemory(Base):
     )
 
 
+MemoryType = Literal[
+    "preference",
+    "profile_note",
+    "temporary_issue",
+    "transaction_request",
+    "unclear",
+]
+MEMORY_TYPES: set[str] = {
+    "preference",
+    "profile_note",
+    "temporary_issue",
+    "transaction_request",
+    "unclear",
+}
+WRITABLE_MEMORY_TYPES: set[str] = {"preference", "profile_note"}
+
+
 class ChatRequest(BaseModel):
     thread_id: str
     message: str
@@ -73,11 +90,10 @@ class ChatResponse(BaseModel):
     customer_id: int | None = None
     tool_results: dict[str, Any] = Field(default_factory=dict)
     verified_facts: dict[str, Any] = Field(default_factory=dict)
-    response_constraints: list[str] = Field(default_factory=list)
     verifier_decision: str | None = None
+    verification_decision: dict[str, Any] = Field(default_factory=dict)
     missing_slots: list[str] = Field(default_factory=list)
     policy_errors: list[dict[str, Any]] = Field(default_factory=list)
-    verification_errors: list[str] = Field(default_factory=list)
 
 
 class OrderReference(BaseModel):
@@ -88,16 +104,10 @@ class OrderReference(BaseModel):
 
 class MemoryWriteCandidate(BaseModel):
     should_write: bool = False
-    memory_type: Literal[
-        "preference",
-        "profile_note",
-        "temporary_issue",
-        "transaction_request",
-        "unclear",
-    ] = "unclear"
+    memory_type: MemoryType = "unclear"
     key: str | None = None
     value: str | None = None
-    reason: str = ""
+    reason_code: str | None = None
 
 
 class VerifierOutput(BaseModel):
@@ -112,8 +122,9 @@ class VerifierOutput(BaseModel):
     safe_actions: list[str] = Field(default_factory=list)
     blocked_actions: list[str] = Field(default_factory=list)
     policy_errors: list[dict[str, Any]] = Field(default_factory=list)
-    reason: str | None = None
-    planner_feedback: str | None = None
+    reason_code: str | None = None
+    planner_feedback_code: str | None = None
+    context: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentState(MessagesState):
@@ -131,14 +142,11 @@ class AgentState(MessagesState):
     tool_calls: list[dict[str, Any]]
     requested_actions: list[dict[str, Any]]
     requires_replan_after_tools: bool
-    follow_up_question: str | None
     tool_results: dict[str, Any]
     verifier_decision: str | None
     verification_decision: dict[str, Any]
     policy_errors: list[dict[str, Any]]
-    verification_errors: list[str]
     verified_facts: dict[str, Any]
-    response_constraints: list[str]
     react_iterations: int
     max_react_iterations: int
     last_turn_order_context: bool

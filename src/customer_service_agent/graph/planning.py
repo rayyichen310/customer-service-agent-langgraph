@@ -4,7 +4,12 @@ import re
 from typing import Any
 
 from customer_service_agent.graph.tools import ACTION_TOOL_NAMES, CONTROL_TOOL_NAMES
-from customer_service_agent.models import MemoryWriteCandidate, OrderReference
+from customer_service_agent.models import (
+    MEMORY_TYPES,
+    WRITABLE_MEMORY_TYPES,
+    MemoryWriteCandidate,
+    OrderReference,
+)
 from customer_service_agent.reasoning import ToolPlan
 
 
@@ -37,16 +42,14 @@ def prepare_plan(
     ]
     plan.missing_slots = missing_slots_for_plan(plan)
 
-    if plan.needs_user_clarification or plan.clarification_question:
-        plan.follow_up_question = plan.clarification_question
+    if plan.needs_user_clarification and not plan.missing_slots:
+        plan.missing_slots.append("user_clarification")
 
     return plan
 
 
 def empty_tool_plan() -> ToolPlan:
-    return ToolPlan(
-        follow_up_question="I need a little more detail to help with that.",
-    )
+    return ToolPlan(needs_user_clarification=True, missing_slots=["planner_action"])
 
 
 def normalize_requested_actions(
@@ -132,22 +135,23 @@ def normalize_memory_candidate(plan: ToolPlan) -> MemoryWriteCandidate:
     candidate = plan.memory_candidate
     if candidate.should_write or candidate.memory_type != "unclear":
         return candidate
-
+    memory_type = first_str_arg(plan.requested_actions, "memory_type") or first_str_arg(
+        plan.tool_calls, "memory_type"
+    )
+    if memory_type not in MEMORY_TYPES:
+        return candidate
     key = plan.memory_key or first_str_arg(plan.requested_actions, "key") or first_str_arg(
         plan.tool_calls, "key"
     )
     value = plan.memory_value or first_str_arg(plan.requested_actions, "value") or first_str_arg(
         plan.tool_calls, "value"
     )
-    if key and value:
-        return MemoryWriteCandidate(
-            should_write=True,
-            memory_type="preference",
-            key=key,
-            value=value,
-            reason="Planner supplied a durable memory key and value.",
-        )
-    return candidate
+    return MemoryWriteCandidate(
+        should_write=memory_type in WRITABLE_MEMORY_TYPES and bool(key and value),
+        memory_type=memory_type,
+        key=key,
+        value=value,
+    )
 
 
 def missing_slots_for_plan(plan: ToolPlan) -> list[str]:

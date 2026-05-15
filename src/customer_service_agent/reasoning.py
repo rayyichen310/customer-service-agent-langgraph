@@ -19,19 +19,14 @@ from customer_service_agent.graph.tools import (
 from customer_service_agent.prompts import BASE_RESPONDER_INSTRUCTIONS, PLANNER_INSTRUCTIONS
 
 
-DEFAULT_FOLLOW_UP_QUESTION = "I need a little more detail to help with that."
-
-
 @dataclass
 class ResponseContext:
     user_message: str
-    tool_results: dict[str, Any]
-    verification_errors: list[str]
+    verification_decision: dict[str, Any]
     long_term_memory: list[dict[str, Any]]
     active_customer_id: int | None
     active_order_id: int | None
     verified_facts: dict[str, Any] = field(default_factory=dict)
-    response_constraints: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -50,7 +45,6 @@ class ToolPlan:
     confidence: str = "low"
     needs_user_clarification: bool = False
     clarification_question: str | None = None
-    follow_up_question: str | None = None
     steps: list[str] = field(default_factory=list)
     reasoning: str = ""
 
@@ -73,7 +67,7 @@ class StructuredChatReasoner(Reasoner):
                 "known_issue": state_snapshot.get("issue"),
                 "observations": state_snapshot.get("tool_results", {}),
                 "missing_slots": state_snapshot.get("missing_slots", []),
-                "planner_feedback": state_snapshot.get("planner_feedback"),
+                "planner_feedback_code": state_snapshot.get("planner_feedback_code"),
                 "verification_decision": state_snapshot.get("verification_decision", {}),
                 "react_iterations": state_snapshot.get("react_iterations"),
                 "max_react_iterations": state_snapshot.get("max_react_iterations"),
@@ -91,9 +85,7 @@ class StructuredChatReasoner(Reasoner):
     def respond(self, context: ResponseContext) -> str:
         payload = {
             "verified_facts": context.verified_facts,
-            "response_constraints": context.response_constraints,
-            "tool_results": context.tool_results,
-            "verification_errors": context.verification_errors,
+            "verification_decision": context.verification_decision,
             "long_term_memory": context.long_term_memory[:5],
             "active_customer_id": context.active_customer_id,
             "active_order_id": context.active_order_id,
@@ -170,7 +162,8 @@ def _build_tool_plan(response: BaseMessage, state_snapshot: dict[str, Any]) -> T
         memory_key=memory_key,
         memory_value=memory_value,
         requires_replan_after_tools=requires_replan_after_tools,
-        follow_up_question=None if tool_calls else DEFAULT_FOLLOW_UP_QUESTION,
+        needs_user_clarification=not tool_calls,
+        missing_slots=[] if tool_calls else ["planner_action"],
         steps=steps,
         reasoning=reasoning,
     )

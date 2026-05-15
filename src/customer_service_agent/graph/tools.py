@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from langchain_core.tools import tool
 
+from customer_service_agent.models import MemoryType
+
 
 ORDER_TOOL_NAMES = {
     "order_lookup",
@@ -74,13 +76,18 @@ def request_log_complaint(
     order_id: int | None = None,
     issue: str = "",
 ) -> str:
-    """Request logging a customer complaint. Execution is gated by verifier policy."""
+    """Request logging a complaint. Leave issue empty when the customer has not provided it."""
     return "schema only"
 
 
 @tool("request_write_memory")
-def request_write_memory(customer_id: int | None = None, key: str = "", value: str = "") -> str:
-    """Request writing a long-term customer memory preference or note."""
+def request_write_memory(
+    customer_id: int | None = None,
+    key: str = "",
+    value: str = "",
+    memory_type: MemoryType = "unclear",
+) -> str:
+    """Request writing a long-term memory item with an explicit memory type."""
     return "schema only"
 
 

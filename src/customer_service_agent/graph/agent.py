@@ -9,11 +9,10 @@ from langgraph.graph import END, START, StateGraph
 from customer_service_agent.models import AgentState, ChatResponse
 from customer_service_agent.reasoning import ResponseContext
 from customer_service_agent.graph.actions import execute_requested_actions
-from customer_service_agent.graph.grounding import build_response_grounding
+from customer_service_agent.graph.response_facts import build_verified_facts
 from customer_service_agent.graph.planning import prepare_plan
 from customer_service_agent.graph.tools import ACTION_TOOL_NAMES, ORDER_TOOL_NAMES
 from customer_service_agent.graph.policy import prefer_explicit_int, verify_policy
-from customer_service_agent.graph.response_style import polish_customer_response
 from customer_service_agent.graph.trace import summarize_node_update
 
 
@@ -33,8 +32,8 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
             "memory_value": state.get("memory_value"),
             "tool_results": state.get("tool_results", {}),
             "missing_slots": state.get("missing_slots", []),
-            "planner_feedback": (state.get("verification_decision") or {}).get(
-                "planner_feedback"
+            "planner_feedback_code": (state.get("verification_decision") or {}).get(
+                "planner_feedback_code"
             ),
             "verification_decision": state.get("verification_decision", {}),
             "previous_turn_order_context": state.get("last_turn_order_context", False),
@@ -67,13 +66,10 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
             "tool_calls": plan.tool_calls,
             "requested_actions": plan.requested_actions,
             "requires_replan_after_tools": plan.requires_replan_after_tools,
-            "follow_up_question": plan.follow_up_question,
             "tool_results": state.get("tool_results", {}),
             "verifier_decision": None,
             "verification_decision": {},
-            "verification_errors": [],
             "verified_facts": {},
-            "response_constraints": [],
             "react_iterations": react_iterations,
             "max_react_iterations": state.get("max_react_iterations") or max_react_iterations,
             "last_turn_order_context": _plan_has_order_context(plan),
@@ -82,9 +78,6 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
         }
 
     def read_tool_node(state: AgentState) -> dict[str, Any]:
-        if state.get("follow_up_question"):
-            return {"tool_results": state.get("tool_results", {})}
-
         tool_results: dict[str, Any] = dict(state.get("tool_results", {}))
         active_customer_id = state.get("active_customer_id")
         active_order_id = state.get("active_order_id")
@@ -123,21 +116,12 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
         }
 
     def memory_node(state: AgentState) -> dict[str, Any]:
-        if state.get("follow_up_question"):
-            return {"long_term_memory": []}
-
         active_customer_id = state.get("active_customer_id")
         if not active_customer_id:
             return {"long_term_memory": []}
 
         memories = repository.read_memories(active_customer_id)
-        long_term_memory = memories[:5]
-
-        complaint = state.get("tool_results", {}).get("complaint")
-        if complaint:
-            long_term_memory = repository.read_memories(active_customer_id)[:5]
-
-        return {"long_term_memory": long_term_memory}
+        return {"long_term_memory": memories[:5]}
 
     def verifier_node(state: AgentState) -> dict[str, Any]:
         return verify_policy(state, max_react_iterations=max_react_iterations)
@@ -150,37 +134,29 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
         if not active_customer_id:
             return {"long_term_memory": state.get("long_term_memory", [])}
 
-        complaint = state.get("tool_results", {}).get("complaint")
-        if complaint:
-            repository.write_memory(active_customer_id, "issue_history", complaint["issue"])
-
         return {"long_term_memory": repository.read_memories(active_customer_id)[:5]}
 
     def response_node(state: AgentState) -> dict[str, Any]:
         last_message = state["messages"][-1].content if state.get("messages") else ""
-        verified_facts, response_constraints = build_response_grounding(
+        verified_facts = build_verified_facts(
             state.get("tool_results", {}),
-            state.get("verification_errors", []),
             state.get("verification_decision", {}),
         )
         response = reasoner.respond(
             ResponseContext(
                 user_message=str(last_message),
-                tool_results=state.get("tool_results", {}),
-                verification_errors=state.get("verification_errors", []),
+                verification_decision=state.get("verification_decision", {}),
                 long_term_memory=state.get("long_term_memory", []),
                 active_customer_id=state.get("active_customer_id"),
                 active_order_id=state.get("active_order_id"),
                 verified_facts=verified_facts,
-                response_constraints=response_constraints,
             )
         )
-        response = polish_customer_response(response, verified_facts)
+        response = response.strip()
         return {
             "messages": [("assistant", response)],
             "final_response": response,
             "verified_facts": verified_facts,
-            "response_constraints": response_constraints,
         }
 
     graph = StateGraph(AgentState)
@@ -226,8 +202,6 @@ def _route_after_verifier(state: AgentState) -> str:
 
 
 def _needs_replan_after_read_tools(state: AgentState) -> bool:
-    if state.get("follow_up_question"):
-        return False
     if int(state.get("react_iterations") or 0) >= int(
         state.get("max_react_iterations") or DEFAULT_MAX_REACT_ITERATIONS
     ):
@@ -321,13 +295,10 @@ def _new_turn_state(
         "tool_calls": [],
         "requested_actions": [],
         "requires_replan_after_tools": False,
-        "follow_up_question": None,
         "tool_results": {},
         "verification_decision": {},
         "policy_errors": [],
-        "verification_errors": [],
         "verified_facts": {},
-        "response_constraints": [],
         "verifier_decision": None,
         "react_iterations": 0,
         "max_react_iterations": max_react_iterations,
@@ -347,9 +318,8 @@ def _chat_response(thread_id: str, result: dict[str, Any]) -> ChatResponse:
         customer_id=result.get("active_customer_id"),
         tool_results=result.get("tool_results", {}),
         verified_facts=result.get("verified_facts", {}),
-        response_constraints=result.get("response_constraints", []),
         verifier_decision=result.get("verifier_decision"),
+        verification_decision=result.get("verification_decision", {}),
         missing_slots=result.get("missing_slots", []),
         policy_errors=result.get("policy_errors", []),
-        verification_errors=result.get("verification_errors", []),
     )

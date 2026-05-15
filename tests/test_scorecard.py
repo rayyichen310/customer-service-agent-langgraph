@@ -17,8 +17,12 @@ def test_scorecard_assertions_fail_bad_refund_record() -> None:
         "tool_calls": ["order_lookup"],
         "requested_actions": [],
         "tool_results": {"order": {"status": "delivered"}},
-        "verification_errors": ["I need a little more detail to help with that."],
-        "response": "I need a little more detail to help with that.",
+        "verification_decision": {
+            "decision": "ask_user",
+            "missing_slots": ["refund_action"],
+            "reason_code": "PLANNER_CLARIFICATION_REQUESTED",
+        },
+        "response": "PLANNER_CLARIFICATION_REQUESTED",
     }
 
     failures = run_scorecard.scorecard_record_failures(record)
@@ -38,7 +42,6 @@ def test_scorecard_planner_iterations_include_order_reference_metadata() -> None
                 "requested_actions": [],
                 "order_reference": {"order_id": 2222, "source": "explicit", "confidence": "high"},
                 "missing_slots": ["complaint_issue"],
-                "follow_up_question": None,
             },
         }
     ]
@@ -50,6 +53,5 @@ def test_scorecard_planner_iterations_include_order_reference_metadata() -> None
             "requested_actions": [],
             "order_reference": {"order_id": 2222, "source": "explicit", "confidence": "high"},
             "missing_slots": ["complaint_issue"],
-            "follow_up_question": None,
         }
     ]

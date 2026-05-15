@@ -3,29 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 
-def build_response_grounding(
-    tool_results: dict[str, Any],
-    verification_errors: list[str],
-    verification_decision: dict[str, Any] | None = None,
-) -> tuple[dict[str, Any], list[str]]:
-    verified_facts = build_verified_facts(
-        tool_results,
-        verification_errors,
-        verification_decision or {},
-    )
-    return verified_facts, build_response_constraints(verified_facts, verification_errors)
-
-
 def build_verified_facts(
     tool_results: dict[str, Any],
-    verification_errors: list[str],
     verification_decision: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     verified_facts: dict[str, Any] = {}
     verification_decision = verification_decision or {}
-
-    if verification_errors:
-        verified_facts["verification_errors"] = list(verification_errors)
 
     policy_errors = verification_decision.get("policy_errors") or []
     if policy_errors:
@@ -118,10 +101,3 @@ def build_verified_facts(
         }
 
     return verified_facts
-
-
-def build_response_constraints(
-    verified_facts: dict[str, Any],
-    verification_errors: list[str],
-) -> list[str]:
-    return []

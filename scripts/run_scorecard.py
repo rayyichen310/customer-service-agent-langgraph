@@ -158,10 +158,9 @@ def main() -> int:
                         "customer_id": result.customer_id,
                         "tool_results": result.tool_results,
                         "verified_facts": result.verified_facts,
-                        "response_constraints": result.response_constraints,
                         "missing_slots": result.missing_slots,
                         "policy_errors": result.policy_errors,
-                        "verification_errors": result.verification_errors,
+                        "verification_decision": result.verification_decision,
                         "response": result.response,
                         "node_trace": node_trace,
                     }
@@ -173,8 +172,9 @@ def main() -> int:
                 actions = planner_requested_action_names(node_trace)
                 if actions:
                     log_progress(args.quiet, f"  requested_actions: {actions}")
-                if result.verification_errors:
-                    log_progress(args.quiet, f"  verifier: {result.verification_errors[0]}")
+                reason_code = result.verification_decision.get("reason_code")
+                if reason_code:
+                    log_progress(args.quiet, f"  verifier: {reason_code}")
                 if records[-1]["assertion_failures"]:
                     log_progress(args.quiet, f"  assertions: {records[-1]['assertion_failures']}")
                 log_progress(args.quiet, f"  response: {result.response}")
@@ -242,7 +242,6 @@ def planner_iterations(node_trace: list[dict[str, Any]]) -> list[dict[str, Any]]
                 ],
                 "order_reference": state.get("order_reference"),
                 "missing_slots": state.get("missing_slots", []),
-                "follow_up_question": state.get("follow_up_question"),
             }
         )
     return iterations
@@ -293,7 +292,8 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
     verified_facts = record.get("verified_facts", {})
     tool_calls = record.get("tool_calls", [])
     requested_actions = record.get("requested_actions", [])
-    errors = record.get("verification_errors", [])
+    verification_decision = record.get("verification_decision", {})
+    errors = verification_decision.get("missing_slots") or record.get("missing_slots", [])
     policy_errors = record.get("policy_errors", [])
     response = record.get("response", "")
 
@@ -339,8 +339,11 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
         require(not _response_says_already_requested(response), "refund response should not say already requested")
         require(not errors, "refund should not ask for more info")
     elif number == 5:
-        require("request_log_complaint" not in requested_actions, "complaint without issue should not request complaint action")
         require("complaint" not in tool_results, "complaint without issue should not be logged")
+        require(
+            verification_decision.get("decision") == "ask_user",
+            "complaint without issue should ask the user before action",
+        )
         require("complaint_issue" in errors or "complaint_issue" in record.get("missing_slots", []), "complaint should ask for issue details")
     elif number == 6:
         require("order_lookup" in tool_calls, "conditional refund should look up order first")
@@ -522,8 +525,7 @@ def log_node_trace(quiet: bool, node_trace: list[dict[str, Any]]) -> None:
         if node == "planner":
             print(
                 f"    customer={state.get('active_customer_id')} order={state.get('active_order_id')} "
-                f"order_reference={state.get('order_reference')} "
-                f"follow_up={state.get('follow_up_question')}",
+                f"order_reference={state.get('order_reference')}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -547,7 +549,7 @@ def log_node_trace(quiet: bool, node_trace: list[dict[str, Any]]) -> None:
             )
         elif node == "verifier":
             print(
-                f"    errors={state.get('verification_errors', [])} "
+                f"    decision={state.get('verification_decision', {})} "
                 f"missing={state.get('missing_slots', [])} "
                 f"policy_errors={state.get('policy_errors', [])} "
                 f"tool_keys={state.get('tool_result_keys', [])}",

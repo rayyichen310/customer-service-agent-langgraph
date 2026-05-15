@@ -34,6 +34,23 @@ ORDER_MUTATION_RULES = {
 
 ORDER_ACTION_NAMES = set(ORDER_MUTATION_RULES)
 
+CUSTOMER_PROFILE_NOT_FOUND = "CUSTOMER_PROFILE_NOT_FOUND"
+PLANNER_CLARIFICATION_REQUESTED = "PLANNER_CLARIFICATION_REQUESTED"
+ORDER_REFERENCE_AMBIGUOUS = "ORDER_REFERENCE_AMBIGUOUS"
+CUSTOMER_ID_MISSING = "CUSTOMER_ID_MISSING"
+ORDER_LOOKUP_REQUIRED_BEFORE_MUTATION = "ORDER_LOOKUP_REQUIRED_BEFORE_MUTATION"
+ORDER_DETAILS_MISSING_AFTER_LOOKUP = "ORDER_DETAILS_MISSING_AFTER_LOOKUP"
+ORDER_DETAILS_MISSING_AFTER_REPLAN_LIMIT = "ORDER_DETAILS_MISSING_AFTER_REPLAN_LIMIT"
+COMPLAINT_ISSUE_MISSING = "COMPLAINT_ISSUE_MISSING"
+MEMORY_WRITE_NOT_ALLOWED = "MEMORY_WRITE_NOT_ALLOWED"
+MEMORY_KEY_VALUE_MISSING = "MEMORY_KEY_VALUE_MISSING"
+ORDER_NOT_FOUND = "ORDER_NOT_FOUND"
+ORDER_CUSTOMER_MISMATCH = "ORDER_CUSTOMER_MISMATCH"
+REFUND_ALREADY_REQUESTED = "REFUND_ALREADY_REQUESTED"
+CANCELLATION_ALREADY_REQUESTED = "CANCELLATION_ALREADY_REQUESTED"
+ORDER_ALREADY_DELIVERED = "ORDER_ALREADY_DELIVERED"
+STATUS_NOT_ALLOWED = "STATUS_NOT_ALLOWED"
+
 
 def verify_policy(state: dict[str, Any], *, max_react_iterations: int) -> dict[str, Any]:
     requested_actions = list(state.get("requested_actions", []))
@@ -85,17 +102,17 @@ def verify_policy(state: dict[str, Any], *, max_react_iterations: int) -> dict[s
             ["customer_id"],
             [],
             [],
-            "Customer profile was not found.",
+            CUSTOMER_PROFILE_NOT_FOUND,
             tool_results,
         )
 
-    if state.get("follow_up_question"):
+    if state.get("missing_slots"):
         return _decision(
             "ask_user",
             state.get("missing_slots", []),
             [],
             [],
-            state["follow_up_question"],
+            PLANNER_CLARIFICATION_REQUESTED,
             tool_results,
         )
 
@@ -127,9 +144,10 @@ def verify_order_mutation(
             missing_slots,
             [],
             list(action_names),
-            "Which order do you mean?",
+            ORDER_REFERENCE_AMBIGUOUS,
             tool_results,
-            planner_feedback="The user's order reference is ambiguous.",
+            context={"order_reference": order_reference.model_dump()},
+            planner_feedback_code=ORDER_REFERENCE_AMBIGUOUS,
         )
 
     if active_customer_id is None:
@@ -138,28 +156,28 @@ def verify_order_mutation(
             missing_slots,
             [],
             list(action_names),
-            "I need a customer ID before changing an order.",
+            CUSTOMER_ID_MISSING,
             tool_results,
         )
 
     if not order:
         if called_order_lookup:
             return _decision(
-            "block",
-            missing_slots,
-            [],
-            list(action_names),
-            None,
-            tool_results,
-            policy_errors=[
-                policy_error(
-                    "ORDER_NOT_FOUND",
-                    blocked_action=first_action_name(action_names),
-                    order_id=order_reference.order_id,
-                    reason="order not found",
-                )
-            ],
-        )
+                "block",
+                missing_slots,
+                [],
+                list(action_names),
+                ORDER_DETAILS_MISSING_AFTER_LOOKUP,
+                tool_results,
+                policy_errors=[
+                    policy_error(
+                        "ORDER_NOT_FOUND",
+                        blocked_action=first_action_name(action_names),
+                        order_id=order_reference.order_id,
+                        reason_code=ORDER_NOT_FOUND,
+                    )
+                ],
+            )
         if can_replan:
             return _decision(
                 "replan",
@@ -168,16 +186,18 @@ def verify_order_mutation(
                 list(action_names),
                 None,
                 tool_results,
-                planner_feedback="Need order lookup before mutation.",
+                planner_feedback_code=ORDER_LOOKUP_REQUIRED_BEFORE_MUTATION,
+                context={"order_id": order_reference.order_id},
             )
         return _decision(
             "ask_user",
             missing_slots,
             [],
             list(action_names),
-            "I need verified order details before changing that order.",
+            ORDER_DETAILS_MISSING_AFTER_REPLAN_LIMIT,
             tool_results,
-            planner_feedback="Replan limit reached before required order details were available.",
+            planner_feedback_code=ORDER_DETAILS_MISSING_AFTER_REPLAN_LIMIT,
+            context={"order_id": order_reference.order_id},
         )
 
     if order["customer_id"] != active_customer_id:
@@ -194,7 +214,7 @@ def verify_order_mutation(
                     blocked_action=first_action_name(action_names),
                     order_id=order["order_id"],
                     customer_id=active_customer_id,
-                    reason="order belongs to a different customer",
+                    reason_code=ORDER_CUSTOMER_MISMATCH,
                 )
             ],
         )
@@ -224,7 +244,6 @@ def verify_order_mutation(
         None,
         tool_results,
         requested_actions=safe_actions,
-        reasoning="Verified order ownership and status before approving requested action.",
     )
 
 
@@ -251,24 +270,21 @@ def verify_complaint(
             missing_slots,
             [],
             ["request_log_complaint"],
-            "Which order would you like to report an issue for?",
+            ORDER_REFERENCE_AMBIGUOUS,
             tool_results,
-            planner_feedback="The user's order reference is ambiguous.",
+            context={"order_reference": order_reference.model_dump()},
+            planner_feedback_code=ORDER_REFERENCE_AMBIGUOUS,
         )
     if "complaint_issue" in missing_slots:
-        order_phrase = (
-            f" for order {order_reference.order_id}" if order_reference.order_id is not None else ""
-        )
         return _decision(
             "ask_user",
             missing_slots,
             [],
             ["request_log_complaint"],
-            f"What issue would you like to report{order_phrase}?",
+            COMPLAINT_ISSUE_MISSING,
             tool_results,
-            planner_feedback=(
-                "The user wants to complain about an order, but did not provide the issue details."
-            ),
+            context={"order_id": order_reference.order_id},
+            planner_feedback_code=COMPLAINT_ISSUE_MISSING,
         )
     if active_customer_id is None:
         return _decision(
@@ -276,7 +292,7 @@ def verify_complaint(
             missing_slots,
             [],
             ["request_log_complaint"],
-            "I need a customer ID before logging that complaint.",
+            CUSTOMER_ID_MISSING,
             tool_results,
         )
 
@@ -297,7 +313,6 @@ def verify_complaint(
         None,
         tool_results,
         requested_actions=[action],
-        reasoning="Verified complaint order reference and issue before approving requested action.",
     )
 
 
@@ -310,19 +325,15 @@ def verify_memory_write(
     candidate = MemoryWriteCandidate(**(state.get("memory_candidate") or {}))
     active_customer_id = state.get("active_customer_id")
     if not candidate.should_write:
-        reason = (
-            "I can remember durable preferences, but this sounds like an order issue or transaction request."
-            if candidate.memory_type in {"temporary_issue", "transaction_request"}
-            else "What would you like me to remember as a long-term preference or profile note?"
-        )
         return _decision(
             "ask_user",
             ["long_term_write_allowed"],
             [],
             ["request_write_memory"],
-            reason,
+            MEMORY_WRITE_NOT_ALLOWED,
             tool_results,
-            planner_feedback=candidate.reason,
+            context={"memory_type": candidate.memory_type},
+            planner_feedback_code=MEMORY_WRITE_NOT_ALLOWED,
         )
 
     if active_customer_id is None:
@@ -331,7 +342,7 @@ def verify_memory_write(
             ["customer_id"],
             [],
             ["request_write_memory"],
-            "I need a customer ID before storing that preference.",
+            CUSTOMER_ID_MISSING,
             tool_results,
         )
 
@@ -343,9 +354,9 @@ def verify_memory_write(
             ["memory_candidate"],
             [],
             ["request_write_memory"],
-            "What would you like me to remember?",
+            MEMORY_KEY_VALUE_MISSING,
             tool_results,
-            planner_feedback="A durable memory write needs a key and value.",
+            planner_feedback_code=MEMORY_KEY_VALUE_MISSING,
         )
 
     action = {
@@ -361,7 +372,6 @@ def verify_memory_write(
         None,
         tool_results,
         requested_actions=[action],
-        reasoning="Verified durable memory candidate before approving memory write.",
     )
 
 
@@ -407,14 +417,14 @@ def order_policy_error(action_name: str, order: dict[str, Any]) -> dict[str, Any
             blocked_action=action_name,
             order_id=order["order_id"],
             current_status=order["status"],
-            reason=status_reason(order["status"]),
+            reason_code=status_reason_code(order["status"]),
         )
     return policy_error(
         "ORDER_NOT_REFUNDABLE",
         blocked_action=action_name,
         order_id=order["order_id"],
         current_status=order["status"],
-        reason=status_reason(order["status"]),
+        reason_code=status_reason_code(order["status"]),
     )
 
 
@@ -425,7 +435,7 @@ def policy_error(
     order_id: int | None = None,
     customer_id: int | None = None,
     current_status: str | None = None,
-    reason: str | None = None,
+    reason_code: str | None = None,
 ) -> dict[str, Any]:
     return {
         "error_code": error_code,
@@ -433,18 +443,18 @@ def policy_error(
         "order_id": order_id,
         "customer_id": customer_id,
         "current_status": current_status,
-        "reason": reason,
+        "reason_code": reason_code,
     }
 
 
-def status_reason(status: str) -> str:
+def status_reason_code(status: str) -> str:
     if status == "refund_requested":
-        return "refund already requested"
+        return REFUND_ALREADY_REQUESTED
     if status == "cancel_requested":
-        return "cancellation already requested"
+        return CANCELLATION_ALREADY_REQUESTED
     if status == "delivered":
-        return "order already delivered"
-    return f"current status is {status}"
+        return ORDER_ALREADY_DELIVERED
+    return STATUS_NOT_ALLOWED
 
 
 def first_action_name(action_names: set[str]) -> str | None:
@@ -469,12 +479,12 @@ def _decision(
     missing_slots: list[str],
     safe_actions: list[str],
     blocked_actions: list[str],
-    reason: str | None,
+    reason_code: str | None,
     tool_results: dict[str, Any],
     *,
     requested_actions: list[dict[str, Any]] | None = None,
-    planner_feedback: str | None = None,
-    reasoning: str | None = None,
+    planner_feedback_code: str | None = None,
+    context: dict[str, Any] | None = None,
     policy_errors: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     output = VerifierOutput(
@@ -483,21 +493,19 @@ def _decision(
         safe_actions=dedupe(safe_actions),
         blocked_actions=dedupe(blocked_actions),
         policy_errors=policy_errors or [],
-        reason=reason,
-        planner_feedback=planner_feedback,
+        reason_code=reason_code,
+        planner_feedback_code=planner_feedback_code,
+        context=context or {},
     )
     result: dict[str, Any] = {
         "verifier_decision": decision,
         "verification_decision": output.model_dump(),
         "missing_slots": output.missing_slots,
         "policy_errors": output.policy_errors,
-        "verification_errors": [reason] if reason and decision == "ask_user" else [],
         "tool_results": tool_results,
     }
     if requested_actions is not None:
         result["requested_actions"] = requested_actions
-    if reasoning:
-        result["reasoning"] = reasoning
     return result
 
 
