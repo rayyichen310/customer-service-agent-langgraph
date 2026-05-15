@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from customer_service_agent.graph.tools import ACTION_TOOL_NAMES
+from customer_service_agent.graph.tools import ACTION_TOOL_NAMES, CONTROL_TOOL_NAMES
 from customer_service_agent.models import (
     MEMORY_TYPES,
     WRITABLE_MEMORY_TYPES,
@@ -25,14 +25,7 @@ def prepare_plan(
         first_int_arg(plan.requested_actions, "customer_id"),
         state_snapshot.get("active_customer_id"),
     )
-    plan.order_id = first_not_none(
-        plan.order_id,
-        first_int_arg(plan.tool_calls, "order_id"),
-        first_int_arg(plan.requested_actions, "order_id"),
-    )
     plan.order_reference = infer_order_reference(plan)
-    if plan.order_reference.order_id is not None and plan.order_id is None:
-        plan.order_id = plan.order_reference.order_id
 
     plan.issue = plan.issue or first_str_arg(plan.requested_actions, "issue") or first_str_arg(
         plan.tool_calls, "issue"
@@ -86,6 +79,7 @@ def normalize_read_tools(plan: ToolPlan) -> list[dict[str, Any]]:
         call
         for call in plan.tool_calls
         if call.get("name") not in ACTION_TOOL_NAMES
+        and call.get("name") not in CONTROL_TOOL_NAMES
     ]
     for call in read_tools:
         args = call.setdefault("args", {})
@@ -103,7 +97,6 @@ def infer_order_reference(plan: ToolPlan) -> OrderReference:
         return plan.order_reference
 
     explicit_order_id = first_not_none(
-        plan.order_id,
         first_int_arg(plan.tool_calls, "order_id"),
         first_int_arg(plan.requested_actions, "order_id"),
     )

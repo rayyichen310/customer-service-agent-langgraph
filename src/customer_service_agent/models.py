@@ -132,6 +132,7 @@ class AgentState(MessagesState):
     memory_candidate: dict[str, Any]
     tool_calls: list[dict[str, Any]]
     requested_actions: list[dict[str, Any]]
+    answer_after_read: bool
     tool_results: dict[str, Any]
     verification_decision: dict[str, Any]
     verified_facts: dict[str, Any]

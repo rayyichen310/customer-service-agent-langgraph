@@ -31,7 +31,6 @@ class ToolPlan:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     requested_actions: list[dict[str, Any]] = field(default_factory=list)
     customer_id: int | None = None
-    order_id: int | None = None
     order_reference: OrderReference = field(default_factory=OrderReference)
     issue: str | None = None
     memory_candidate: MemoryWriteCandidate = field(default_factory=MemoryWriteCandidate)
