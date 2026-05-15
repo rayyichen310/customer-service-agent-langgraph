@@ -87,10 +87,9 @@ class RefundAfterObservationReasoner:
                     {"name": "order_lookup", "args": {"order_id": 7890}, "id": "lookup-1"}
                 ],
                 order_id=7890,
-                requires_replan_after_tools=True,
             )
 
-        action = {"name": "request_refund", "args": {"order_id": 7890}, "id": "refund-1"}
+        action = {"name": "propose_refund", "args": {"order_id": 7890}, "id": "refund-1"}
         return ToolPlan(
             tool_calls=[action],
             requested_actions=[action],
@@ -118,7 +117,6 @@ class LookupOnlyReasoner:
                 }
             ],
                 order_id=7890,
-                requires_replan_after_tools=False,
             )
 
     def respond(self, context: ResponseContext) -> str:
@@ -133,7 +131,7 @@ class CombinedThenActionReasoner:
 
     def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
         self.plan_calls += 1
-        action = {"name": "request_refund", "args": {"order_id": 7890}, "id": "refund-1"}
+        action = {"name": "propose_refund", "args": {"order_id": 7890}, "id": "refund-1"}
         if self.plan_calls == 1:
             lookup = {"name": "order_lookup", "args": {"order_id": 7890}, "id": "lookup-1"}
             return ToolPlan(
@@ -159,7 +157,7 @@ class ActionFirstThenLookupReasoner:
 
     def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
         self.plan_snapshots.append(state_snapshot)
-        action = {"name": "request_refund", "args": {"order_id": 7890}, "id": "refund-1"}
+        action = {"name": "propose_refund", "args": {"order_id": 7890}, "id": "refund-1"}
         if len(self.plan_snapshots) == 1:
             return ToolPlan(
                 tool_calls=[action],
@@ -172,7 +170,6 @@ class ActionFirstThenLookupReasoner:
                     {"name": "order_lookup", "args": {"order_id": 7890}, "id": "lookup-1"}
                 ],
                 order_id=7890,
-                requires_replan_after_tools=True,
             )
         return ToolPlan(
             tool_calls=[action],
@@ -232,7 +229,6 @@ class PassiveReasoner:
                     {"name": "order_lookup", "args": {"order_id": order_id}, "id": "lookup-1"}
                 ],
                 order_id=order_id,
-                requires_replan_after_tools=True,
             )
         if "profile" in user_message.lower():
             return ToolPlan(
@@ -249,9 +245,9 @@ class PassiveReasoner:
             return ToolPlan(
                 tool_calls=[
                     {
-                        "name": "list_customer_complaints",
+                        "name": "read_customer_issue_history",
                         "args": {"customer_id": state_snapshot.get("active_customer_id")},
-                        "id": "complaints-1",
+                        "id": "issue-history-1",
                     }
                 ],
                 customer_id=state_snapshot.get("active_customer_id"),
@@ -292,15 +288,15 @@ class SequentialAmbiguousComplaintReasoner:
             return ToolPlan(
                 tool_calls=[
                     {
-                        "name": "list_customer_complaints",
+                        "name": "read_customer_issue_history",
                         "args": {"customer_id": state_snapshot.get("active_customer_id")},
-                        "id": "complaints-1",
+                        "id": "issue-history-1",
                     }
                 ],
                 customer_id=state_snapshot.get("active_customer_id"),
             )
         action = {
-            "name": "request_log_complaint",
+            "name": "propose_log_complaint",
             "args": {
                 "customer_id": state_snapshot.get("active_customer_id"),
                 "issue": "late again",
@@ -329,11 +325,10 @@ class ActiveOrderCancelReasoner:
                     {"name": "order_lookup", "args": {"order_id": 2468}, "id": "lookup-1"}
                 ],
                 order_id=2468,
-                requires_replan_after_tools=True,
             )
         if (
             "cancel" in normalized
-            and state_snapshot.get("planner_feedback_code") == "ORDER_LOOKUP_REQUIRED_BEFORE_MUTATION"
+            and (state_snapshot.get("planner_feedback") or {}).get("code") == "ORDER_LOOKUP_REQUIRED_BEFORE_MUTATION"
         ):
             return ToolPlan(
                 tool_calls=[
@@ -343,11 +338,10 @@ class ActiveOrderCancelReasoner:
                         "id": "lookup-2",
                     }
                 ],
-                requires_replan_after_tools=True,
             )
         if "cancel" in normalized:
             action = {
-                "name": "request_cancel_order",
+                "name": "propose_cancel_order",
                 "args": {"order_id": state_snapshot.get("active_order_id")},
                 "id": "cancel-1",
             }
@@ -371,7 +365,7 @@ class ComplaintThenProfileReasoner:
         self.plan_snapshots.append(state_snapshot)
         if "complaint" in user_message.lower():
             action = {
-                "name": "request_log_complaint",
+                "name": "propose_log_complaint",
                 "args": {
                     "customer_id": state_snapshot.get("active_customer_id"),
                     "order_id": 7890,
@@ -413,9 +407,8 @@ class RefundByMessageReasoner:
                     {"name": "order_lookup", "args": {"order_id": order_id}, "id": "lookup-1"}
                 ],
                 order_id=order_id,
-                requires_replan_after_tools=True,
             )
-        action = {"name": "request_refund", "args": {"order_id": order["order_id"]}, "id": "refund-1"}
+        action = {"name": "propose_refund", "args": {"order_id": order["order_id"]}, "id": "refund-1"}
         return ToolPlan(
             tool_calls=[action],
             requested_actions=[action],
@@ -435,9 +428,8 @@ class CancelAfterObservationReasoner:
                     {"name": "order_lookup", "args": {"order_id": 2468}, "id": "lookup-1"}
                 ],
                 order_id=2468,
-                requires_replan_after_tools=True,
             )
-        action = {"name": "request_cancel_order", "args": {"order_id": 2468}, "id": "cancel-1"}
+        action = {"name": "propose_cancel_order", "args": {"order_id": 2468}, "id": "cancel-1"}
         return ToolPlan(
             tool_calls=[action],
             requested_actions=[action],
@@ -459,7 +451,7 @@ class NoToolMemoryWriteReasoner:
 class ExplicitMemoryWriteReasoner:
     def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
         action = {
-            "name": "request_write_memory",
+            "name": "propose_write_memory",
             "args": {
                 "customer_id": state_snapshot.get("active_customer_id"),
                 "key": "refund_preference",
@@ -472,8 +464,6 @@ class ExplicitMemoryWriteReasoner:
             tool_calls=[action],
             requested_actions=[action],
             customer_id=state_snapshot.get("active_customer_id"),
-            memory_key="refund_preference",
-            memory_value="prefers refunds",
             memory_candidate=MemoryWriteCandidate(
                 should_write=True,
                 memory_type="preference",
@@ -494,7 +484,7 @@ class MemoryCandidateReasoner:
 
     def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
         action = {
-            "name": "request_write_memory",
+            "name": "propose_write_memory",
             "args": {"customer_id": state_snapshot.get("active_customer_id")},
             "id": "memory-1",
         }
@@ -521,7 +511,7 @@ class WarmClarificationReasoner:
 
     def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
         action = {
-            "name": "request_log_complaint",
+            "name": "propose_log_complaint",
             "args": {
                 "customer_id": state_snapshot.get("active_customer_id"),
                 "order_id": 2222,
@@ -562,7 +552,7 @@ class ActionRequestReasoner:
         order = state_snapshot.get("tool_results", {}).get("order")
         if (
             self.request_type in {"refund", "cancel"}
-            and state_snapshot.get("planner_feedback_code") == "ORDER_LOOKUP_REQUIRED_BEFORE_MUTATION"
+            and (state_snapshot.get("planner_feedback") or {}).get("code") == "ORDER_LOOKUP_REQUIRED_BEFORE_MUTATION"
             and not order
         ):
             return ToolPlan(
@@ -575,7 +565,6 @@ class ActionRequestReasoner:
                 ],
                 customer_id=state_snapshot.get("active_customer_id"),
                 order_id=self.order_id,
-                requires_replan_after_tools=True,
             )
 
         tool_calls = self._tool_calls(state_snapshot.get("active_customer_id"))
@@ -583,8 +572,6 @@ class ActionRequestReasoner:
             customer_id=state_snapshot.get("active_customer_id"),
             order_id=self.order_id,
             issue=self.issue,
-            memory_key=self.memory_key,
-            memory_value=self.memory_value,
             tool_calls=tool_calls,
             requested_actions=tool_calls,
         )
@@ -598,42 +585,42 @@ class ActionRequestReasoner:
         if self.request_type == "refund":
             return [
                 {
-                    "name": "request_refund",
+                    "name": "propose_refund",
                     "args": {"order_id": self.order_id},
-                    "id": "request_refund-1",
+                    "id": "propose_refund-1",
                 }
             ]
         if self.request_type == "cancel":
             return [
                 {
-                    "name": "request_cancel_order",
+                    "name": "propose_cancel_order",
                     "args": {"order_id": self.order_id},
-                    "id": "request_cancel_order-1",
+                    "id": "propose_cancel_order-1",
                 }
             ]
         if self.request_type == "complaint":
             return [
                 {
-                    "name": "request_log_complaint",
+                    "name": "propose_log_complaint",
                     "args": {
                         "customer_id": customer_id,
                         "order_id": self.order_id,
                         "issue": self.issue,
                     },
-                    "id": "request_log_complaint-1",
+                    "id": "propose_log_complaint-1",
                 }
             ]
         if self.request_type == "memory_write":
             return [
                 {
-                    "name": "request_write_memory",
+                    "name": "propose_write_memory",
                     "args": {
                         "customer_id": customer_id,
                         "key": self.memory_key,
                         "value": self.memory_value,
                         "memory_type": "preference",
                     },
-                    "id": "request_write_memory-1",
+                    "id": "propose_write_memory-1",
                 }
             ]
         return []
@@ -655,8 +642,6 @@ class DirectMutationReasoner:
             customer_id=args.get("customer_id"),
             order_id=args.get("order_id"),
             issue=args.get("issue"),
-            memory_key=args.get("key"),
-            memory_value=args.get("value"),
         )
 
     def respond(self, context: ResponseContext) -> str:
@@ -675,7 +660,7 @@ def test_refund_uses_react_loop_before_action() -> None:
     assert [call["name"] for call in planner_updates[0]["tool_calls"]] == ["order_lookup"]
     assert planner_updates[0]["requested_actions"] == []
     assert [action["name"] for action in planner_updates[1]["requested_actions"]] == [
-        "request_refund"
+        "propose_refund"
     ]
     assert planner_updates[0]["order_reference"] == {
         "order_id": 7890,
@@ -687,10 +672,10 @@ def test_refund_uses_react_loop_before_action() -> None:
 
     verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
     assert [action["name"] for action in verifier_updates[-1]["requested_actions"]] == [
-        "request_refund"
+        "propose_refund"
     ]
     assert verifier_updates[-1]["verifier_decision"] == "proceed_to_action"
-    assert response.verifier_decision == "proceed_to_action"
+    assert response.verification_decision["decision"] == "proceed_to_action"
     assert response.tool_results["refund"]["status"] == "refund_requested"
     assert response.verified_facts["refund_request"] == {
         "order_id": 7890,
@@ -712,12 +697,12 @@ def test_planner_action_calls_are_verifier_gated() -> None:
     verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
     assert [call["name"] for call in planner_updates[0]["tool_calls"]] == ["order_lookup"]
     assert [action["name"] for action in planner_updates[0]["requested_actions"]] == [
-        "request_refund"
+        "propose_refund"
     ]
     assert [update["verifier_decision"] for update in verifier_updates] == ["proceed_to_action"]
     assert [update["node"] for update in updates].count("actions") == 1
     assert reasoner.plan_calls == 1
-    assert response.verifier_decision == "proceed_to_action"
+    assert response.verification_decision["decision"] == "proceed_to_action"
     assert response.tool_results["refund"]["status"] == "refund_requested"
 
 
@@ -743,9 +728,9 @@ def test_verifier_replans_when_mutation_lacks_order_observation() -> None:
     )
     assert [call["name"] for call in planner_updates[1]["tool_calls"]] == ["order_lookup"]
     assert [action["name"] for action in planner_updates[-1]["requested_actions"]] == [
-        "request_refund"
+        "propose_refund"
     ]
-    assert response.verifier_decision == "proceed_to_action"
+    assert response.verification_decision["decision"] == "proceed_to_action"
     assert response.tool_results["refund"]["status"] == "refund_requested"
 
 
@@ -758,10 +743,10 @@ def test_lookup_only_planner_does_not_fabricate_refund_action() -> None:
 
     verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
 
-    assert reasoner.plan_calls == 1
-    assert [update["node"] for update in updates].count("planner") == 1
+    assert reasoner.plan_calls == 3
+    assert [update["node"] for update in updates].count("planner") == 3
     assert verifier_updates[-1]["requested_actions"] == []
-    assert response.verifier_decision == "proceed_to_response"
+    assert response.verification_decision["decision"] == "proceed_to_response"
     assert "refund" not in response.tool_results
     assert repository.get_order(7890)["status"] == "delivered"
 
@@ -793,7 +778,7 @@ def test_explicit_memory_write_candidate_routes_success_through_responder() -> N
     assert planner_updates[0]["memory_candidate"]["memory_type"] == "preference"
     assert planner_updates[0]["memory_candidate"]["should_write"] is True
     assert [action["name"] for action in verifier_updates[-1]["requested_actions"]] == [
-        "request_write_memory"
+        "propose_write_memory"
     ]
     assert response.tool_results["memory_write"]["key"] == "refund_preference"
     assert response.verified_facts["memory_written"]["key"] == "refund_preference"
@@ -820,21 +805,21 @@ def test_action_request_resolve_to_verifier_actions() -> None:
         (
             "refund",
             ActionRequestReasoner("refund", order_id=7890),
-            "request_refund",
+            "propose_refund",
             "Refund order 7890",
             7,
         ),
         (
             "cancel",
             ActionRequestReasoner("cancel", order_id=2468),
-            "request_cancel_order",
+            "propose_cancel_order",
             "Cancel order 2468",
             7,
         ),
         (
             "complaint",
             ActionRequestReasoner("complaint", order_id=7890, issue="package damaged"),
-            "request_log_complaint",
+            "propose_log_complaint",
             "I want to complain about order 7890",
             7,
         ),
@@ -845,7 +830,7 @@ def test_action_request_resolve_to_verifier_actions() -> None:
                 memory_key="contact_preference",
                 memory_value="prefers email",
             ),
-            "request_write_memory",
+            "propose_write_memory",
             "Remember I prefer email",
             7,
         ),
@@ -862,7 +847,7 @@ def test_action_request_resolve_to_verifier_actions() -> None:
         ]
 
 
-def test_action_request_refund_delivered_order_resolves_to_refund_action() -> None:
+def test_action_propose_refund_delivered_order_resolves_to_refund_action() -> None:
     repository = build_repository()
     reasoner = ActionRequestReasoner("refund", order_id=7890)
     agent = CustomerServiceAgent(reasoner, repository)
@@ -871,7 +856,7 @@ def test_action_request_refund_delivered_order_resolves_to_refund_action() -> No
 
     verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
     assert [action["name"] for action in verifier_updates[-1]["requested_actions"]] == [
-        "request_refund"
+        "propose_refund"
     ]
     assert verifier_updates[-1]["requested_actions"][0]["args"] == {"order_id": 7890}
     assert response.tool_results["refund"]["status"] == "refund_requested"
@@ -887,17 +872,17 @@ def test_action_request_cancel_block_status_does_not_mutate() -> None:
 
     verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
     assert verifier_updates[-1]["verifier_decision"] == "block"
-    assert response.policy_errors == [
+    assert response.verification_decision.get("policy_errors", []) == [
         {
             "error_code": "ORDER_NOT_CANCELLABLE",
-            "blocked_action": "request_cancel_order",
+            "blocked_action": "propose_cancel_order",
             "order_id": 7890,
             "customer_id": None,
             "current_status": "delivered",
             "reason_code": "ORDER_ALREADY_DELIVERED",
         }
     ]
-    assert response.verified_facts["policy_errors"] == response.policy_errors
+    assert response.verified_facts["policy_errors"] == response.verification_decision.get("policy_errors", [])
     assert "cancelled_order" not in response.tool_results
     assert repository.get_order(7890)["status"] == "delivered"
 
@@ -913,9 +898,9 @@ def test_complaint_missing_issue_asks_before_logging() -> None:
     )
 
     verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
-    assert response.verifier_decision == "ask_user"
+    assert response.verification_decision["decision"] == "ask_user"
     assert "complaint" not in response.tool_results
-    assert "complaint_issue" in response.missing_slots
+    assert "complaint_issue" in response.verification_decision.get("missing_slots", [])
     assert verifier_updates[-1]["verification_decision"]["decision"] == "ask_user"
     assert verifier_updates[-1]["verification_decision"]["missing_slots"] == ["complaint_issue"]
 
@@ -936,7 +921,7 @@ def test_ask_user_response_routes_through_responder() -> None:
     assert verification_decision["decision"] == "ask_user"
     assert verification_decision["reason_code"] == "COMPLAINT_ISSUE_MISSING"
     assert verification_decision["context"] == {"order_id": 2222}
-    assert response.verifier_decision == "ask_user"
+    assert response.verification_decision["decision"] == "ask_user"
     assert response.response == "Could you tell me what issue you'd like to report for order 2222?"
     assert "complaint" not in response.tool_results
 
@@ -954,7 +939,7 @@ def test_complaint_with_issue_logs_complaint() -> None:
         customer_id=7,
     )
 
-    assert response.verifier_decision == "proceed_to_action"
+    assert response.verification_decision["decision"] == "proceed_to_action"
     assert response.tool_results["complaint"]["order_id"] == 2222
     assert "damaged" in response.tool_results["complaint"]["issue"].lower()
 
@@ -970,9 +955,9 @@ def test_ambiguous_order_reference_asks_before_complaint() -> None:
 
     planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
     assert planner_updates[-1]["order_reference"]["confidence"] == "low"
-    assert response.verifier_decision == "ask_user"
+    assert response.verification_decision["decision"] == "ask_user"
     assert "complaint" not in response.tool_results
-    assert "order_id" in response.missing_slots
+    assert "order_id" in response.verification_decision.get("missing_slots", [])
 
 
 def test_active_order_reference_runs_lookup_before_cancel() -> None:
@@ -989,7 +974,7 @@ def test_active_order_reference_runs_lookup_before_cancel() -> None:
         "confidence": "high",
     }
     assert [call["name"] for call in planner_updates[1]["tool_calls"]] == ["order_lookup"]
-    assert response.verifier_decision == "proceed_to_action"
+    assert response.verification_decision["decision"] == "proceed_to_action"
     assert response.tool_results["cancelled_order"]["order_id"] == 2468
 
 
@@ -1012,7 +997,7 @@ def test_temporary_issue_is_not_written_to_long_term_memory() -> None:
     planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
     assert planner_updates[-1]["memory_candidate"]["memory_type"] == "temporary_issue"
     assert "memory_write" not in response.tool_results
-    assert response.verifier_decision == "ask_user"
+    assert response.verification_decision["decision"] == "ask_user"
     assert not repository.read_memories(7, key="customer_note")
 
 
@@ -1035,8 +1020,8 @@ def test_transaction_request_is_not_written_to_long_term_memory() -> None:
     planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
     assert planner_updates[-1]["memory_candidate"]["memory_type"] == "transaction_request"
     assert "memory_write" not in response.tool_results
-    assert response.verifier_decision == "ask_user"
-    assert response.missing_slots == ["long_term_write_allowed"]
+    assert response.verification_decision["decision"] == "ask_user"
+    assert response.verification_decision.get("missing_slots", []) == ["long_term_write_allowed"]
 
 
 def test_successful_mutations_use_responder_instead_of_deterministic_templates() -> None:
@@ -1047,7 +1032,7 @@ def test_successful_mutations_use_responder_instead_of_deterministic_templates()
 
     complaint_agent = CustomerServiceAgent(
         DirectMutationReasoner(
-            "request_log_complaint",
+            "propose_log_complaint",
             {"order_id": 7890, "issue": "package damaged"},
         ),
         repository,
@@ -1060,7 +1045,7 @@ def test_successful_mutations_use_responder_instead_of_deterministic_templates()
 
     memory_agent = CustomerServiceAgent(
         DirectMutationReasoner(
-            "request_write_memory",
+            "propose_write_memory",
             {
                 "key": "contact_preference",
                 "value": "prefers email",
@@ -1122,11 +1107,11 @@ def test_customer_cannot_refund_another_customers_order() -> None:
 
     verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
     assert verifier_updates[-1]["verifier_decision"] == "block"
-    assert response.verifier_decision == "block"
-    assert response.policy_errors == [
+    assert response.verification_decision["decision"] == "block"
+    assert response.verification_decision.get("policy_errors", []) == [
         {
             "error_code": "ORDER_CUSTOMER_MISMATCH",
-            "blocked_action": "request_refund",
+            "blocked_action": "propose_refund",
             "order_id": 7890,
             "customer_id": 8,
             "current_status": None,

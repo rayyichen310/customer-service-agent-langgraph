@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from customer_service_agent.graph.tools import ACTION_TOOL_NAMES, CONTROL_TOOL_NAMES
+from customer_service_agent.graph.tools import ACTION_TOOL_NAMES
 from customer_service_agent.models import (
     MEMORY_TYPES,
     WRITABLE_MEMORY_TYPES,
@@ -38,24 +38,15 @@ def prepare_plan(
         plan.tool_calls, "issue"
     )
     plan.memory_candidate = normalize_memory_candidate(plan)
-    if plan.memory_candidate.should_write:
-        plan.memory_key = plan.memory_key or plan.memory_candidate.key
-        plan.memory_value = plan.memory_value or plan.memory_candidate.value
 
-    has_control_replan = any(call.get("name") in CONTROL_TOOL_NAMES for call in plan.tool_calls)
     plan.requested_actions = normalize_requested_actions(plan)
     plan.tool_calls = normalize_read_tools(plan)
-    plan.requires_replan_after_tools = plan.requires_replan_after_tools or has_control_replan
-    plan.missing_slots = missing_slots_for_plan(plan)
-
-    if plan.needs_user_clarification and not plan.missing_slots:
-        plan.missing_slots.append("user_clarification")
 
     return plan
 
 
 def empty_tool_plan() -> ToolPlan:
-    return ToolPlan(needs_user_clarification=True, missing_slots=["planner_action"])
+    return ToolPlan()
 
 
 def normalize_requested_actions(
@@ -71,21 +62,21 @@ def normalize_requested_actions(
     for action in actions_by_name.values():
         name = str(action.get("name") or "")
         args = dict(action.get("args") or {})
-        if name in {"request_refund", "request_cancel_order", "request_log_complaint"}:
+        if name in {"propose_refund", "propose_cancel_order", "propose_log_complaint"}:
             if args.get("order_id") is None and plan.order_reference.order_id is not None:
                 args["order_id"] = plan.order_reference.order_id
-        if name == "request_log_complaint":
+        if name == "propose_log_complaint":
             if args.get("customer_id") is None and plan.customer_id is not None:
                 args["customer_id"] = plan.customer_id
             if not args.get("issue") and plan.issue:
                 args["issue"] = plan.issue
-        if name == "request_write_memory":
+        if name == "propose_write_memory":
             if args.get("customer_id") is None and plan.customer_id is not None:
                 args["customer_id"] = plan.customer_id
-            if not args.get("key") and plan.memory_key:
-                args["key"] = plan.memory_key
-            if not args.get("value") and plan.memory_value:
-                args["value"] = plan.memory_value
+            if not args.get("key") and plan.memory_candidate.key:
+                args["key"] = plan.memory_candidate.key
+            if not args.get("value") and plan.memory_candidate.value:
+                args["value"] = plan.memory_candidate.value
         normalized.append({"name": name, "args": args, "id": action.get("id")})
     return normalized
 
@@ -95,7 +86,6 @@ def normalize_read_tools(plan: ToolPlan) -> list[dict[str, Any]]:
         call
         for call in plan.tool_calls
         if call.get("name") not in ACTION_TOOL_NAMES
-        and call.get("name") not in CONTROL_TOOL_NAMES
     ]
     for call in read_tools:
         args = call.setdefault("args", {})
@@ -128,53 +118,34 @@ def infer_order_reference(plan: ToolPlan) -> OrderReference:
 
 def normalize_memory_candidate(plan: ToolPlan) -> MemoryWriteCandidate:
     candidate = plan.memory_candidate
-    if candidate.should_write or candidate.memory_type != "unclear":
-        return candidate
-    memory_type = first_str_arg(plan.requested_actions, "memory_type") or first_str_arg(
-        plan.tool_calls, "memory_type"
+    memory_type = (
+        candidate.memory_type
+        if candidate.memory_type != "unclear"
+        else first_str_arg(plan.requested_actions, "memory_type")
+        or first_str_arg(plan.tool_calls, "memory_type")
+        or "unclear"
     )
     if memory_type not in MEMORY_TYPES:
-        return candidate
-    key = plan.memory_key or first_str_arg(plan.requested_actions, "key") or first_str_arg(
-        plan.tool_calls, "key"
+        memory_type = "unclear"
+    key = (
+        candidate.key
+        or first_str_arg(plan.requested_actions, "key")
+        or first_str_arg(plan.tool_calls, "key")
     )
-    value = plan.memory_value or first_str_arg(plan.requested_actions, "value") or first_str_arg(
-        plan.tool_calls, "value"
+    value = (
+        candidate.value
+        or first_str_arg(plan.requested_actions, "value")
+        or first_str_arg(plan.tool_calls, "value")
     )
     return MemoryWriteCandidate(
-        should_write=memory_type in WRITABLE_MEMORY_TYPES and bool(key and value),
+        should_write=(
+            candidate.should_write or memory_type in WRITABLE_MEMORY_TYPES and bool(key and value)
+        ),
         memory_type=memory_type,
         key=key,
         value=value,
+        reason_code=candidate.reason_code,
     )
-
-
-def missing_slots_for_plan(plan: ToolPlan) -> list[str]:
-    missing: list[str] = list(plan.missing_slots)
-    action_names = {action.get("name") for action in plan.requested_actions}
-    if action_names & {"request_refund", "request_cancel_order"}:
-        if plan.customer_id is None:
-            missing.append("customer_id")
-        if plan.order_reference.order_id is None or plan.order_reference.confidence != "high":
-            missing.append("order_id")
-        missing.extend(["order_status", "order_customer_id"])
-    if "request_log_complaint" in action_names:
-        if plan.customer_id is None:
-            missing.append("customer_id")
-        if plan.order_reference.order_id is None or plan.order_reference.confidence != "high":
-            missing.append("order_id")
-        if not plan.issue:
-            missing.append("complaint_issue")
-    if "request_write_memory" in action_names:
-        if plan.customer_id is None:
-            missing.append("customer_id")
-        if not plan.memory_candidate.should_write:
-            missing.append("long_term_write_allowed")
-        if not plan.memory_key:
-            missing.append("memory_key")
-        if not plan.memory_value:
-            missing.append("memory_value")
-    return dedupe(missing)
 
 
 def first_int_arg(calls: list[dict[str, Any]], key: str) -> int | None:
@@ -206,13 +177,3 @@ def first_not_none(*values):
         if value is not None:
             return value
     return None
-
-
-def dedupe(values: list[str]) -> list[str]:
-    seen = set()
-    result = []
-    for value in values:
-        if value not in seen:
-            result.append(value)
-            seen.add(value)
-    return result

@@ -11,7 +11,6 @@ from langchain_openai import ChatOpenAI
 from customer_service_agent.config import Settings
 from customer_service_agent.models import MemoryWriteCandidate, OrderReference
 from customer_service_agent.graph.tools import (
-    CONTROL_TOOL_NAMES,
     PLANNER_TOOLS,
 )
 from customer_service_agent.prompts import BASE_RESPONDER_INSTRUCTIONS, PLANNER_INSTRUCTIONS
@@ -35,12 +34,7 @@ class ToolPlan:
     order_id: int | None = None
     order_reference: OrderReference = field(default_factory=OrderReference)
     issue: str | None = None
-    memory_key: str | None = None
-    memory_value: str | None = None
     memory_candidate: MemoryWriteCandidate = field(default_factory=MemoryWriteCandidate)
-    missing_slots: list[str] = field(default_factory=list)
-    requires_replan_after_tools: bool = False
-    needs_user_clarification: bool = False
 
 
 class Reasoner:
@@ -60,9 +54,7 @@ class StructuredChatReasoner(Reasoner):
                 "order_reference": state_snapshot.get("order_reference"),
                 "known_issue": state_snapshot.get("issue"),
                 "observations": state_snapshot.get("tool_results", {}),
-                "missing_slots": state_snapshot.get("missing_slots", []),
-                "planner_feedback_code": state_snapshot.get("planner_feedback_code"),
-                "verification_decision": state_snapshot.get("verification_decision", {}),
+                "planner_feedback": state_snapshot.get("planner_feedback", {}),
                 "react_iterations": state_snapshot.get("react_iterations"),
                 "max_react_iterations": state_snapshot.get("max_react_iterations"),
             }
@@ -133,13 +125,9 @@ def build_reasoner(settings: Settings) -> Reasoner:
 def _build_tool_plan(response: BaseMessage) -> ToolPlan:
     raw_tool_calls = getattr(response, "tool_calls", []) or []
     tool_calls = [_normalize_tool_call(tool_call) for tool_call in raw_tool_calls]
-    requires_replan_after_tools = any(call["name"] in CONTROL_TOOL_NAMES for call in tool_calls)
 
     return ToolPlan(
         tool_calls=tool_calls,
-        requires_replan_after_tools=requires_replan_after_tools,
-        needs_user_clarification=not tool_calls,
-        missing_slots=[] if tool_calls else ["planner_action"],
     )
 
 

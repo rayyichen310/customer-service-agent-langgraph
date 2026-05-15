@@ -90,10 +90,7 @@ class ChatResponse(BaseModel):
     customer_id: int | None = None
     tool_results: dict[str, Any] = Field(default_factory=dict)
     verified_facts: dict[str, Any] = Field(default_factory=dict)
-    verifier_decision: str | None = None
     verification_decision: dict[str, Any] = Field(default_factory=dict)
-    missing_slots: list[str] = Field(default_factory=list)
-    policy_errors: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class OrderReference(BaseModel):
@@ -130,20 +127,13 @@ class VerifierOutput(BaseModel):
 class AgentState(MessagesState):
     active_customer_id: int | None
     active_order_id: int | None
-    current_turn_order_id: int | None
     order_reference: dict[str, Any]
     issue: str | None
-    memory_key: str | None
-    memory_value: str | None
     memory_candidate: dict[str, Any]
-    missing_slots: list[str]
     tool_calls: list[dict[str, Any]]
     requested_actions: list[dict[str, Any]]
-    requires_replan_after_tools: bool
     tool_results: dict[str, Any]
-    verifier_decision: str | None
     verification_decision: dict[str, Any]
-    policy_errors: list[dict[str, Any]]
     verified_facts: dict[str, Any]
     react_iterations: int
     max_react_iterations: int

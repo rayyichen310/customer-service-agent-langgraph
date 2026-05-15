@@ -6,19 +6,19 @@ from customer_service_agent.graph.policy import prefer_explicit_int
 
 
 ORDER_MUTATION_ACTIONS = {
-    "request_refund": ("refund", "request_refund"),
-    "request_cancel_order": ("cancelled_order", "cancel_order"),
+    "propose_refund": ("refund", "request_refund"),
+    "propose_cancel_order": ("cancelled_order", "cancel_order"),
 }
 
 
 def execute_requested_actions(state: dict[str, Any], repository) -> dict[str, Any]:
     tool_results = dict(state.get("tool_results", {}))
-    if state.get("verifier_decision") != "proceed_to_action":
+    if (state.get("verification_decision") or {}).get("decision") != "proceed_to_action":
         return tool_results
 
     handlers = {
-        "request_log_complaint": _request_log_complaint,
-        "request_write_memory": _request_write_memory,
+        "propose_log_complaint": _propose_log_complaint,
+        "propose_write_memory": _propose_write_memory,
     }
 
     for action in state.get("requested_actions", []):
@@ -58,7 +58,7 @@ def _request_order_mutation(
     )
 
 
-def _request_log_complaint(
+def _propose_log_complaint(
     *,
     tool_results: dict[str, Any],
     repository,
@@ -76,7 +76,7 @@ def _request_log_complaint(
         )
 
 
-def _request_write_memory(
+def _propose_write_memory(
     *,
     tool_results: dict[str, Any],
     repository,
@@ -84,8 +84,9 @@ def _request_write_memory(
     args: dict[str, Any],
 ) -> None:
     customer_id = _customer_id(args, state)
-    key = args.get("key") or state.get("memory_key")
-    value = args.get("value") or state.get("memory_value")
+    memory_candidate = state.get("memory_candidate") or {}
+    key = args.get("key") or memory_candidate.get("key")
+    value = args.get("value") or memory_candidate.get("value")
     if customer_id is not None and key and value:
         tool_results["memory_write"] = repository.write_memory(
             customer_id=customer_id,
@@ -99,4 +100,4 @@ def _customer_id(args: dict[str, Any], state: dict[str, Any]) -> int | None:
 
 
 def _order_id(args: dict[str, Any], state: dict[str, Any]) -> int | None:
-    return prefer_explicit_int(args.get("order_id"), state.get("current_turn_order_id"))
+    return prefer_explicit_int(args.get("order_id"), state.get("active_order_id"))

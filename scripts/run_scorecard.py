@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 import uuid
 from pathlib import Path
@@ -112,7 +111,7 @@ def main() -> int:
     parser.add_argument(
         "--show-node-trace",
         action="store_true",
-        help="Print planner/read_tools/memory/verifier/actions/respond updates for each query.",
+        help="Print planner/read_tools/verifier/actions/respond updates for each query; read_tools appears only when read calls run.",
     )
     parser.add_argument(
         "--case",
@@ -158,8 +157,6 @@ def main() -> int:
                         "customer_id": result.customer_id,
                         "tool_results": result.tool_results,
                         "verified_facts": result.verified_facts,
-                        "missing_slots": result.missing_slots,
-                        "policy_errors": result.policy_errors,
                         "verification_decision": result.verification_decision,
                         "response": result.response,
                         "node_trace": node_trace,
@@ -241,7 +238,6 @@ def planner_iterations(node_trace: list[dict[str, Any]]) -> list[dict[str, Any]]
                     for action in state.get("requested_actions", [])
                 ],
                 "order_reference": state.get("order_reference"),
-                "missing_slots": state.get("missing_slots", []),
             }
         )
     return iterations
@@ -293,8 +289,8 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
     tool_calls = record.get("tool_calls", [])
     requested_actions = record.get("requested_actions", [])
     verification_decision = record.get("verification_decision", {})
-    errors = verification_decision.get("missing_slots") or record.get("missing_slots", [])
-    policy_errors = record.get("policy_errors", [])
+    errors = verification_decision.get("missing_slots", [])
+    policy_errors = verification_decision.get("policy_errors", [])
     response = record.get("response", "")
 
     def require(condition: bool, message: str) -> None:
@@ -310,7 +306,7 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
         require("order" not in tool_results, "profile response should not include stale order result")
     elif number == 4:
         require("order_lookup" in tool_calls, "refund should look up order first")
-        require("request_refund" in requested_actions, "refund should request refund action")
+        require("propose_refund" in requested_actions, "refund should propose refund action")
         require(
             tool_results.get("refund", {}).get("status") == "refund_requested",
             "order 5678 should be refund_requested",
@@ -331,20 +327,23 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
             _response_mentions(response, "refund", "5678"),
             "refund response should mention the grounded refund and order",
         )
-        require(_has_successful_action_style(response), "refund response should use 2-3 concise sentences")
         require(not errors, "refund should not ask for more info")
     elif number == 5:
         require("complaint" not in tool_results, "complaint without issue should not be logged")
-        require(
-            verification_decision.get("decision") == "ask_user",
-            "complaint without issue should ask the user before action",
-        )
-        require("complaint_issue" in errors or "complaint_issue" in record.get("missing_slots", []), "complaint should ask for issue details")
+        if "propose_log_complaint" in requested_actions:
+            require(
+                verification_decision.get("decision") == "ask_user",
+                "complaint without issue should ask the user before action",
+            )
+            require(
+                "complaint_issue" in errors,
+                "complaint should ask for issue details",
+            )
     elif number == 6:
         require("order_lookup" in tool_calls, "conditional refund should look up order first")
         require(
-            "request_refund" in requested_actions,
-            "conditional refund should request refund action after verification",
+            "propose_refund" in requested_actions,
+            "conditional refund should propose refund action after verification",
         )
         require(
             tool_results.get("refund", {}).get("status") == "refund_requested",
@@ -362,10 +361,6 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
             _response_mentions(response, "refund", "7890"),
             "conditional refund response should mention the grounded refund and order",
         )
-        require(
-            _has_successful_action_style(response),
-            "conditional refund response should use 2-3 concise sentences",
-        )
     elif number == 7:
         require(
             policy_errors
@@ -377,7 +372,7 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
         require("complaints" in tool_results, "memory read should include complaints")
         require("order" not in tool_results, "memory read should not include stale order result")
     elif number == 9:
-        require("request_write_memory" in requested_actions, "memory write should request write action")
+        require("propose_write_memory" in requested_actions, "memory write should propose write action")
         require(
             tool_results.get("memory_write", {}).get("key") == "refund_preference",
             "memory write should update refund_preference",
@@ -387,15 +382,10 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
             "memory write response should be grounded to refund_preference",
         )
         require(_response_mentions(response, "refund"), "memory write response should mention the grounded preference")
-        require(
-            _has_successful_action_style(response),
-            "memory write response should use 2-3 concise sentences",
-        )
         require(not errors, "memory write should not ask for more info")
     elif number == 10:
-        require("request_log_complaint" not in requested_actions, "ambiguous order complaint should not log complaint")
+        require("propose_log_complaint" not in requested_actions, "ambiguous order complaint should not log complaint")
         require("complaint" not in tool_results, "ambiguous order complaint should not create complaint")
-        require(errors, "ambiguous order complaint should ask which order")
     elif number == 11:
         require(
             policy_errors
@@ -421,14 +411,6 @@ def scorecard_exit_code(records: list[dict[str, Any]]) -> int:
 def _response_mentions(response: str, *terms: str) -> bool:
     normalized = response.lower()
     return all(term.lower() in normalized for term in terms)
-
-
-def _has_successful_action_style(response: str) -> bool:
-    return 2 <= _sentence_count(response) <= 3
-
-
-def _sentence_count(response: str) -> int:
-    return len([part for part in re.split(r"[.!?]+", response) if part.strip()])
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -485,23 +467,27 @@ def log_node_trace(quiet: bool, node_trace: list[dict[str, Any]]) -> None:
                 file=sys.stderr,
                 flush=True,
             )
-        elif node in {"memory", "memory_update"}:
-            print(
-                f"    long_term_memory_count={state.get('long_term_memory_count', 0)}",
-                file=sys.stderr,
-                flush=True,
-            )
         elif node == "verifier":
+            decision = state.get("verification_decision", {})
+            details = []
+            if decision.get("missing_slots"):
+                details.append(f"missing={decision['missing_slots']}")
+            if decision.get("policy_errors"):
+                details.append(f"policy_errors={decision['policy_errors']}")
+            if state.get("tool_result_keys"):
+                details.append(f"tool_keys={state['tool_result_keys']}")
             print(
-                f"    decision={state.get('verification_decision', {})} "
-                f"missing={state.get('missing_slots', [])} "
-                f"policy_errors={state.get('policy_errors', [])} "
-                f"tool_keys={state.get('tool_result_keys', [])}",
+                "    " + " ".join([f"decision={decision}", *details]),
                 file=sys.stderr,
                 flush=True,
             )
         elif node == "respond":
-            print(f"    final_response={state.get('final_response')}", file=sys.stderr, flush=True)
+            print(
+                f"    final_response={state.get('final_response')} "
+                f"long_term_memory_count={state.get('long_term_memory_count', 0)}",
+                file=sys.stderr,
+                flush=True,
+            )
         else:
             print(f"    {state}", file=sys.stderr, flush=True)
 

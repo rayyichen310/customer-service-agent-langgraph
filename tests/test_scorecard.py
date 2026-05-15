@@ -20,20 +20,20 @@ def test_scorecard_assertions_fail_bad_refund_record() -> None:
         "verification_decision": {
             "decision": "ask_user",
             "missing_slots": ["refund_action"],
-            "reason_code": "PLANNER_CLARIFICATION_REQUESTED",
+            "reason_code": "REFUND_ACTION_MISSING",
         },
-        "response": "PLANNER_CLARIFICATION_REQUESTED",
+        "response": "REFUND_ACTION_MISSING",
     }
 
     failures = run_scorecard.scorecard_record_failures(record)
     record["assertion_failures"] = failures
 
     assert failures
-    assert "refund should request refund action" in failures
+    assert "refund should propose refund action" in failures
     assert run_scorecard.scorecard_exit_code([record]) == 1
 
 
-def test_scorecard_planner_iterations_include_order_reference_metadata() -> None:
+def test_scorecard_planner_iterations_include_order_reference_metadata_without_slots() -> None:
     node_trace = [
         {
             "node": "planner",
@@ -41,7 +41,6 @@ def test_scorecard_planner_iterations_include_order_reference_metadata() -> None
                 "tool_calls": [],
                 "requested_actions": [],
                 "order_reference": {"order_id": 2222, "source": "explicit", "confidence": "high"},
-                "missing_slots": ["complaint_issue"],
             },
         }
     ]
@@ -52,6 +51,5 @@ def test_scorecard_planner_iterations_include_order_reference_metadata() -> None
             "tool_calls": [],
             "requested_actions": [],
             "order_reference": {"order_id": 2222, "source": "explicit", "confidence": "high"},
-            "missing_slots": ["complaint_issue"],
         }
     ]
