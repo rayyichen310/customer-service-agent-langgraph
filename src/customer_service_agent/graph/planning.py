@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from customer_service_agent.graph.tools import ACTION_TOOL_NAMES, CONTROL_TOOL_NAMES
@@ -15,13 +14,23 @@ from customer_service_agent.reasoning import ToolPlan
 
 def prepare_plan(
     plan,
-    user_message: str,
     state_snapshot: dict[str, Any],
 ):
     if plan is None:
         plan = empty_tool_plan()
 
-    plan.order_reference = infer_order_reference(user_message, plan, state_snapshot)
+    plan.customer_id = first_not_none(
+        plan.customer_id,
+        first_int_arg(plan.tool_calls, "customer_id"),
+        first_int_arg(plan.requested_actions, "customer_id"),
+        state_snapshot.get("active_customer_id"),
+    )
+    plan.order_id = first_not_none(
+        plan.order_id,
+        first_int_arg(plan.tool_calls, "order_id"),
+        first_int_arg(plan.requested_actions, "order_id"),
+    )
+    plan.order_reference = infer_order_reference(plan)
     if plan.order_reference.order_id is not None and plan.order_id is None:
         plan.order_id = plan.order_reference.order_id
 
@@ -37,9 +46,6 @@ def prepare_plan(
     plan.requested_actions = normalize_requested_actions(plan)
     plan.tool_calls = normalize_read_tools(plan)
     plan.requires_replan_after_tools = plan.requires_replan_after_tools or has_control_replan
-    plan.steps = [call["name"] for call in plan.tool_calls] + [
-        action["name"] for action in plan.requested_actions
-    ]
     plan.missing_slots = missing_slots_for_plan(plan)
 
     if plan.needs_user_clarification and not plan.missing_slots:
@@ -93,18 +99,20 @@ def normalize_read_tools(plan: ToolPlan) -> list[dict[str, Any]]:
     ]
     for call in read_tools:
         args = call.setdefault("args", {})
-        if call.get("name") == "order_lookup" and args.get("order_id") is None:
+        if (
+            call.get("name") == "order_lookup"
+            and args.get("order_id") is None
+            and plan.order_reference.order_id is not None
+        ):
             args["order_id"] = plan.order_reference.order_id
     return read_tools
 
 
-def infer_order_reference(
-    user_message: str,
-    plan: ToolPlan,
-    state_snapshot: dict[str, Any],
-) -> OrderReference:
+def infer_order_reference(plan: ToolPlan) -> OrderReference:
+    if plan.order_reference.order_id is not None and plan.order_reference.confidence == "high":
+        return plan.order_reference
+
     explicit_order_id = first_not_none(
-        int_from_message(user_message),
         plan.order_id,
         first_int_arg(plan.tool_calls, "order_id"),
         first_int_arg(plan.requested_actions, "order_id"),
@@ -112,21 +120,8 @@ def infer_order_reference(
     if explicit_order_id is not None:
         return OrderReference(order_id=explicit_order_id, source="explicit", confidence="high")
 
-    active_order_id = state_snapshot.get("active_order_id")
-    if active_order_id is None:
-        return OrderReference(source="none", confidence="low")
-
-    if has_pronoun_reference(user_message):
-        confidence = "high" if state_snapshot.get("previous_turn_order_context") else "low"
-        return OrderReference(order_id=active_order_id, source="pronoun", confidence=confidence)
-
-    if has_weak_order_reference(user_message):
-        confidence = "medium" if state_snapshot.get("previous_turn_order_context") else "low"
-        return OrderReference(
-            order_id=active_order_id,
-            source="active_context",
-            confidence=confidence,
-        )
+    if plan.order_reference.order_id is not None:
+        return plan.order_reference
 
     return OrderReference(source="none", confidence="low")
 
@@ -180,22 +175,6 @@ def missing_slots_for_plan(plan: ToolPlan) -> list[str]:
         if not plan.memory_value:
             missing.append("memory_value")
     return dedupe(missing)
-
-
-def has_pronoun_reference(message: str) -> bool:
-    return bool(re.search(r"\b(it|that|this)\b", message.lower()))
-
-
-def has_weak_order_reference(message: str) -> bool:
-    normalized = message.lower()
-    return "my order" in normalized or "this order" in normalized or "the order" in normalized
-
-
-def int_from_message(message: str) -> int | None:
-    match = re.search(r"\b\d+\b", message)
-    if not match:
-        return None
-    return int(match.group(0))
 
 
 def first_int_arg(calls: list[dict[str, Any]], key: str) -> int | None:

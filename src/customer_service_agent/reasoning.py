@@ -11,9 +11,7 @@ from langchain_openai import ChatOpenAI
 from customer_service_agent.config import Settings
 from customer_service_agent.models import MemoryWriteCandidate, OrderReference
 from customer_service_agent.graph.tools import (
-    ACTION_TOOL_NAMES,
     CONTROL_TOOL_NAMES,
-    ORDER_TOOL_NAMES,
     PLANNER_TOOLS,
 )
 from customer_service_agent.prompts import BASE_RESPONDER_INSTRUCTIONS, PLANNER_INSTRUCTIONS
@@ -42,11 +40,7 @@ class ToolPlan:
     memory_candidate: MemoryWriteCandidate = field(default_factory=MemoryWriteCandidate)
     missing_slots: list[str] = field(default_factory=list)
     requires_replan_after_tools: bool = False
-    confidence: str = "low"
     needs_user_clarification: bool = False
-    clarification_question: str | None = None
-    steps: list[str] = field(default_factory=list)
-    reasoning: str = ""
 
 
 class Reasoner:
@@ -80,7 +74,7 @@ class StructuredChatReasoner(Reasoner):
                 HumanMessage(content=f"User query: {user_message}"),
             ]
         )
-        return _build_tool_plan(response, state_snapshot)
+        return _build_tool_plan(response)
 
     def respond(self, context: ResponseContext) -> str:
         payload = {
@@ -136,36 +130,16 @@ def build_reasoner(settings: Settings) -> Reasoner:
     raise ValueError(f"Unsupported LLM_BACKEND: {settings.llm_backend}")
 
 
-def _build_tool_plan(response: BaseMessage, state_snapshot: dict[str, Any]) -> ToolPlan:
+def _build_tool_plan(response: BaseMessage) -> ToolPlan:
     raw_tool_calls = getattr(response, "tool_calls", []) or []
     tool_calls = [_normalize_tool_call(tool_call) for tool_call in raw_tool_calls]
-    requested_actions = [call for call in tool_calls if call["name"] in ACTION_TOOL_NAMES]
     requires_replan_after_tools = any(call["name"] in CONTROL_TOOL_NAMES for call in tool_calls)
-    customer_id = _planned_id(tool_calls, "customer_id", state_snapshot.get("active_customer_id"))
-    order_id = _planned_id(tool_calls, "order_id", None)
-    _fill_missing_ids(tool_calls, customer_id=customer_id, order_id=order_id)
-
-    issue = _first_str_arg(tool_calls, "issue")
-    memory_key = _first_str_arg(tool_calls, "key")
-    memory_value = _first_str_arg(tool_calls, "value")
-    steps = [call["name"] for call in tool_calls]
-    reasoning = _message_text(response)
-    if reasoning == str(getattr(response, "content", "")) and not reasoning:
-        reasoning = "Tool calls selected by the model."
 
     return ToolPlan(
         tool_calls=tool_calls,
-        requested_actions=requested_actions,
-        customer_id=customer_id,
-        order_id=order_id,
-        issue=issue,
-        memory_key=memory_key,
-        memory_value=memory_value,
         requires_replan_after_tools=requires_replan_after_tools,
         needs_user_clarification=not tool_calls,
         missing_slots=[] if tool_calls else ["planner_action"],
-        steps=steps,
-        reasoning=reasoning,
     )
 
 
@@ -179,47 +153,6 @@ def _normalize_tool_call(tool_call: Any) -> dict[str, Any]:
         args = getattr(tool_call, "args", {}) or {}
         tool_call_id = getattr(tool_call, "id", None)
     return {"name": name, "args": dict(args), "id": tool_call_id}
-
-
-def _planned_id(
-    tool_calls: list[dict[str, Any]],
-    key: str,
-    fallback: int | None,
-) -> int | None:
-    value = _first_int_arg(tool_calls, key)
-    return value if value is not None else fallback
-
-
-def _fill_missing_ids(
-    tool_calls: list[dict[str, Any]],
-    *,
-    customer_id: int | None,
-    order_id: int | None,
-) -> None:
-    for call in tool_calls:
-        args = call["args"]
-        if args.get("customer_id") is None and customer_id is not None:
-            args["customer_id"] = customer_id
-        if call["name"] in ORDER_TOOL_NAMES and args.get("order_id") is None and order_id is not None:
-            args["order_id"] = order_id
-
-
-def _first_int_arg(tool_calls: list[dict[str, Any]], key: str) -> int | None:
-    for call in tool_calls:
-        value = call["args"].get(key)
-        if isinstance(value, int):
-            return value
-        if isinstance(value, str) and value.isdigit():
-            return int(value)
-    return None
-
-
-def _first_str_arg(tool_calls: list[dict[str, Any]], key: str) -> str | None:
-    for call in tool_calls:
-        value = call["args"].get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
 
 
 def _message_text(message: BaseMessage) -> str:

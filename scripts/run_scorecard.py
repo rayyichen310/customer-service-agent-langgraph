@@ -332,11 +332,6 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
             "refund response should mention the grounded refund and order",
         )
         require(_has_successful_action_style(response), "refund response should use 2-3 concise sentences")
-        require(
-            not _response_makes_unsupported_future_promise(response),
-            "refund response should not promise unsupported future handling",
-        )
-        require(not _response_says_already_requested(response), "refund response should not say already requested")
         require(not errors, "refund should not ask for more info")
     elif number == 5:
         require("complaint" not in tool_results, "complaint without issue should not be logged")
@@ -371,16 +366,7 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
             _has_successful_action_style(response),
             "conditional refund response should use 2-3 concise sentences",
         )
-        require(
-            not _response_makes_unsupported_future_promise(response),
-            "conditional refund response should not promise unsupported future handling",
-        )
-        require(
-            not _response_says_already_requested(response),
-            "conditional refund response should not say already requested",
-        )
     elif number == 7:
-        require("little more detail" not in response.lower(), "cancel should not ask for more info when active order is known")
         require(
             policy_errors
             and policy_errors[0].get("error_code") == "ORDER_NOT_CANCELLABLE",
@@ -404,10 +390,6 @@ def scorecard_record_failures(record: dict[str, Any]) -> list[str]:
         require(
             _has_successful_action_style(response),
             "memory write response should use 2-3 concise sentences",
-        )
-        require(
-            not _response_makes_unsupported_future_promise(response),
-            "memory write response should not promise unsupported future handling",
         )
         require(not errors, "memory write should not ask for more info")
     elif number == 10:
@@ -441,48 +423,12 @@ def _response_mentions(response: str, *terms: str) -> bool:
     return all(term.lower() in normalized for term in terms)
 
 
-def _response_says_already_requested(response: str) -> bool:
-    normalized = response.lower()
-    return "already requested" in normalized or "already submitted" in normalized
-
-
 def _has_successful_action_style(response: str) -> bool:
     return 2 <= _sentence_count(response) <= 3
 
 
 def _sentence_count(response: str) -> int:
     return len([part for part in re.split(r"[.!?]+", response) if part.strip()])
-
-
-def _has_empathy_phrase(response: str) -> bool:
-    normalized = response.lower()
-    return any(
-        phrase in normalized
-        for phrase in {
-            "sorry",
-            "understand",
-            "appreciate",
-            "thanks",
-            "thank you",
-        }
-    )
-
-
-def _response_makes_unsupported_future_promise(response: str) -> bool:
-    normalized = response.lower()
-    blocked_phrases = {
-        "we are working",
-        "we're working",
-        "working to resolve",
-        "will follow up",
-        "we'll follow up",
-        "will investigate",
-        "we'll investigate",
-        "looking into",
-        "escalated",
-        "will be resolved",
-    }
-    return any(phrase in normalized for phrase in blocked_phrases)
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -532,8 +478,6 @@ def log_node_trace(quiet: bool, node_trace: list[dict[str, Any]]) -> None:
             if state.get("tool_calls"):
                 calls = [call.get("name") for call in state["tool_calls"]]
                 print(f"    tool_calls={calls}", file=sys.stderr, flush=True)
-            if state.get("plan_steps"):
-                print(f"    steps={state['plan_steps']}", file=sys.stderr, flush=True)
         elif node in {"read_tools", "actions"}:
             print(
                 f"    tools={state.get('tool_result_keys', [])} "

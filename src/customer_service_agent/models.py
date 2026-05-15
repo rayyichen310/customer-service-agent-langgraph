@@ -98,7 +98,7 @@ class ChatResponse(BaseModel):
 
 class OrderReference(BaseModel):
     order_id: int | None = None
-    source: Literal["explicit", "pronoun", "active_context", "inferred", "none"] = "none"
+    source: Literal["explicit", "none"] = "none"
     confidence: Literal["high", "medium", "low"] = "low"
 
 
@@ -128,8 +128,6 @@ class VerifierOutput(BaseModel):
 
 
 class AgentState(MessagesState):
-    plan_steps: list[str]
-    reasoning: str | None
     active_customer_id: int | None
     active_order_id: int | None
     current_turn_order_id: int | None
@@ -149,7 +147,6 @@ class AgentState(MessagesState):
     verified_facts: dict[str, Any]
     react_iterations: int
     max_react_iterations: int
-    last_turn_order_context: bool
     long_term_memory: list[dict[str, Any]]
     final_response: str | None
 

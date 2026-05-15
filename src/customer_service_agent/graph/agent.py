@@ -11,7 +11,6 @@ from customer_service_agent.reasoning import ResponseContext
 from customer_service_agent.graph.actions import execute_requested_actions
 from customer_service_agent.graph.response_facts import build_verified_facts
 from customer_service_agent.graph.planning import prepare_plan
-from customer_service_agent.graph.tools import ACTION_TOOL_NAMES, ORDER_TOOL_NAMES
 from customer_service_agent.graph.policy import prefer_explicit_int, verify_policy
 from customer_service_agent.graph.trace import summarize_node_update
 
@@ -36,12 +35,11 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
                 "planner_feedback_code"
             ),
             "verification_decision": state.get("verification_decision", {}),
-            "previous_turn_order_context": state.get("last_turn_order_context", False),
             "react_iterations": react_iterations,
             "max_react_iterations": state.get("max_react_iterations") or max_react_iterations,
         }
         plan = reasoner.plan(str(last_message), state_snapshot)
-        plan = prepare_plan(plan, str(last_message), state_snapshot)
+        plan = prepare_plan(plan, state_snapshot)
         next_customer_id = (
             plan.customer_id if plan.customer_id is not None else state.get("active_customer_id")
         )
@@ -52,8 +50,9 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
             else state.get("active_order_id")
         )
         return {
-            "plan_steps": plan.steps,
-            "reasoning": plan.reasoning,
+            **_reset_turn_outputs(
+                max_react_iterations=state.get("max_react_iterations") or max_react_iterations,
+            ),
             "active_customer_id": next_customer_id,
             "active_order_id": next_order_id,
             "current_turn_order_id": plan.order_reference.order_id,
@@ -67,14 +66,7 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
             "requested_actions": plan.requested_actions,
             "requires_replan_after_tools": plan.requires_replan_after_tools,
             "tool_results": state.get("tool_results", {}),
-            "verifier_decision": None,
-            "verification_decision": {},
-            "verified_facts": {},
             "react_iterations": react_iterations,
-            "max_react_iterations": state.get("max_react_iterations") or max_react_iterations,
-            "last_turn_order_context": _plan_has_order_context(plan),
-            "long_term_memory": [],
-            "final_response": None,
         }
 
     def read_tool_node(state: AgentState) -> dict[str, Any]:
@@ -116,12 +108,7 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
         }
 
     def memory_node(state: AgentState) -> dict[str, Any]:
-        active_customer_id = state.get("active_customer_id")
-        if not active_customer_id:
-            return {"long_term_memory": []}
-
-        memories = repository.read_memories(active_customer_id)
-        return {"long_term_memory": memories[:5]}
+        return {"long_term_memory": _read_recent_memory(repository, state.get("active_customer_id"))}
 
     def verifier_node(state: AgentState) -> dict[str, Any]:
         return verify_policy(state, max_react_iterations=max_react_iterations)
@@ -130,11 +117,7 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
         return {"tool_results": execute_requested_actions(state, repository)}
 
     def memory_update_node(state: AgentState) -> dict[str, Any]:
-        active_customer_id = state.get("active_customer_id")
-        if not active_customer_id:
-            return {"long_term_memory": state.get("long_term_memory", [])}
-
-        return {"long_term_memory": repository.read_memories(active_customer_id)[:5]}
+        return {"long_term_memory": _read_recent_memory(repository, state.get("active_customer_id"))}
 
     def response_node(state: AgentState) -> dict[str, Any]:
         last_message = state["messages"][-1].content if state.get("messages") else ""
@@ -218,13 +201,22 @@ def _needs_replan_after_read_tools(state: AgentState) -> bool:
     return called_order_lookup and bool(state.get("tool_results", {}).get("order"))
 
 
-def _plan_has_order_context(plan) -> bool:
-    if plan.order_reference.order_id is not None and plan.order_reference.confidence == "high":
-        return True
-    return any(
-        call.get("name") in ORDER_TOOL_NAMES or call.get("name") in ACTION_TOOL_NAMES
-        for call in [*plan.tool_calls, *plan.requested_actions]
-    )
+def _read_recent_memory(repository, customer_id: int | None) -> list[dict[str, Any]]:
+    if customer_id is None:
+        return []
+    return repository.read_memories(customer_id)[:5]
+
+
+def _reset_turn_outputs(*, max_react_iterations: int) -> dict[str, Any]:
+    return {
+        "verifier_decision": None,
+        "verification_decision": {},
+        "verified_facts": {},
+        "policy_errors": [],
+        "long_term_memory": [],
+        "final_response": None,
+        "max_react_iterations": max_react_iterations,
+    }
 
 
 class CustomerServiceAgent:
@@ -283,8 +275,6 @@ def _new_turn_state(
 ) -> dict[str, Any]:
     state = {
         "messages": [HumanMessage(content=message)],
-        "plan_steps": [],
-        "reasoning": None,
         "issue": None,
         "memory_key": None,
         "memory_value": None,

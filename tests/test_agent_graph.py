@@ -88,8 +88,6 @@ class RefundAfterObservationReasoner:
                 ],
                 order_id=7890,
                 requires_replan_after_tools=True,
-                steps=["order_lookup"],
-                reasoning="Need to observe the order before requesting a refund.",
             )
 
         action = {"name": "request_refund", "args": {"order_id": 7890}, "id": "refund-1"}
@@ -97,8 +95,6 @@ class RefundAfterObservationReasoner:
             tool_calls=[action],
             requested_actions=[action],
             order_id=7890,
-            steps=["request_refund"],
-            reasoning="The observed order is delivered, so request a refund.",
         )
 
     def respond(self, context: ResponseContext) -> str:
@@ -123,8 +119,6 @@ class LookupOnlyReasoner:
             ],
                 order_id=7890,
                 requires_replan_after_tools=False,
-                steps=["order_lookup"],
-                reasoning="Keep looking up the order without requesting the mutation.",
             )
 
     def respond(self, context: ResponseContext) -> str:
@@ -146,15 +140,11 @@ class CombinedThenActionReasoner:
                 tool_calls=[lookup, action],
                 requested_actions=[action],
                 order_id=7890,
-                steps=["order_lookup", "request_refund"],
-                reasoning="Incorrectly combined read and action.",
             )
         return ToolPlan(
             tool_calls=[action],
             requested_actions=[action],
             order_id=7890,
-            steps=["request_refund"],
-            reasoning="Request refund after the previous observation.",
         )
 
     def respond(self, context: ResponseContext) -> str:
@@ -175,8 +165,6 @@ class ActionFirstThenLookupReasoner:
                 tool_calls=[action],
                 requested_actions=[action],
                 order_id=7890,
-                steps=["request_refund"],
-                reasoning="Incorrectly requested refund before reading order details.",
             )
         if not state_snapshot.get("tool_results", {}).get("order"):
             return ToolPlan(
@@ -185,15 +173,11 @@ class ActionFirstThenLookupReasoner:
                 ],
                 order_id=7890,
                 requires_replan_after_tools=True,
-                steps=["order_lookup"],
-                reasoning="Verifier requested order lookup before refund.",
             )
         return ToolPlan(
             tool_calls=[action],
             requested_actions=[action],
             order_id=7890,
-            steps=["request_refund"],
-            reasoning="Request refund after verified order observation.",
         )
 
     def respond(self, context: ResponseContext) -> str:
@@ -210,7 +194,6 @@ class CustomerReadReasoner:
                     {"name": "order_lookup", "args": {"order_id": 7890}, "id": "lookup-1"}
                 ],
                 order_id=7890,
-                steps=["order_lookup"],
             )
         if "memory" in user_message.lower():
             return ToolPlan(
@@ -222,7 +205,6 @@ class CustomerReadReasoner:
                     }
                 ],
                 customer_id=state_snapshot.get("active_customer_id"),
-                steps=["read_customer_memory"],
             )
         return ToolPlan(
             tool_calls=[
@@ -233,7 +215,6 @@ class CustomerReadReasoner:
                 }
             ],
             customer_id=state_snapshot.get("active_customer_id"),
-            steps=["customer_profile"],
         )
 
     def respond(self, context: ResponseContext) -> str:
@@ -252,7 +233,6 @@ class PassiveReasoner:
                 ],
                 order_id=order_id,
                 requires_replan_after_tools=True,
-                steps=["order_lookup"],
             )
         if "profile" in user_message.lower():
             return ToolPlan(
@@ -264,7 +244,6 @@ class PassiveReasoner:
                     }
                 ],
                 customer_id=state_snapshot.get("active_customer_id"),
-                steps=["customer_profile"],
             )
         if "issues" in user_message.lower():
             return ToolPlan(
@@ -276,7 +255,6 @@ class PassiveReasoner:
                     }
                 ],
                 customer_id=state_snapshot.get("active_customer_id"),
-                steps=["list_customer_complaints"],
             )
         return ToolPlan(customer_id=state_snapshot.get("active_customer_id"))
 
@@ -298,7 +276,6 @@ class SequentialAmbiguousComplaintReasoner:
                     {"name": "order_lookup", "args": {"order_id": 7890}, "id": "lookup-1"}
                 ],
                 order_id=7890,
-                steps=["order_lookup"],
             )
         if self.plan_calls == 2:
             return ToolPlan(
@@ -310,7 +287,6 @@ class SequentialAmbiguousComplaintReasoner:
                     }
                 ],
                 customer_id=state_snapshot.get("active_customer_id"),
-                steps=["customer_profile"],
             )
         if self.plan_calls == 3:
             return ToolPlan(
@@ -322,7 +298,6 @@ class SequentialAmbiguousComplaintReasoner:
                     }
                 ],
                 customer_id=state_snapshot.get("active_customer_id"),
-                steps=["list_customer_complaints"],
             )
         action = {
             "name": "request_log_complaint",
@@ -337,7 +312,6 @@ class SequentialAmbiguousComplaintReasoner:
             requested_actions=[action],
             customer_id=state_snapshot.get("active_customer_id"),
             issue="late again",
-            steps=["request_log_complaint"],
         )
 
     def respond(self, context: ResponseContext) -> str:
@@ -346,7 +320,7 @@ class SequentialAmbiguousComplaintReasoner:
         return "Done."
 
 
-class PronounCancelReasoner:
+class ActiveOrderCancelReasoner:
     def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
         normalized = user_message.lower()
         if "check order" in normalized:
@@ -356,23 +330,30 @@ class PronounCancelReasoner:
                 ],
                 order_id=2468,
                 requires_replan_after_tools=True,
-                steps=["order_lookup"],
             )
         if (
             "cancel" in normalized
             and state_snapshot.get("planner_feedback_code") == "ORDER_LOOKUP_REQUIRED_BEFORE_MUTATION"
         ):
             return ToolPlan(
-                tool_calls=[{"name": "order_lookup", "args": {}, "id": "lookup-2"}],
+                tool_calls=[
+                    {
+                        "name": "order_lookup",
+                        "args": {"order_id": state_snapshot.get("active_order_id")},
+                        "id": "lookup-2",
+                    }
+                ],
                 requires_replan_after_tools=True,
-                steps=["order_lookup"],
             )
         if "cancel" in normalized:
-            action = {"name": "request_cancel_order", "args": {}, "id": "cancel-1"}
+            action = {
+                "name": "request_cancel_order",
+                "args": {"order_id": state_snapshot.get("active_order_id")},
+                "id": "cancel-1",
+            }
             return ToolPlan(
                 tool_calls=[action],
                 requested_actions=[action],
-                steps=["request_cancel_order"],
             )
         return ToolPlan(customer_id=state_snapshot.get("active_customer_id"))
 
@@ -404,7 +385,6 @@ class ComplaintThenProfileReasoner:
                 customer_id=state_snapshot.get("active_customer_id"),
                 order_id=7890,
                 issue="package damaged",
-                steps=["request_log_complaint"],
             )
         return ToolPlan(
             tool_calls=[
@@ -415,7 +395,6 @@ class ComplaintThenProfileReasoner:
                 }
             ],
             customer_id=state_snapshot.get("active_customer_id"),
-            steps=["customer_profile"],
         )
 
     def respond(self, context: ResponseContext) -> str:
@@ -435,14 +414,12 @@ class RefundByMessageReasoner:
                 ],
                 order_id=order_id,
                 requires_replan_after_tools=True,
-                steps=["order_lookup"],
             )
         action = {"name": "request_refund", "args": {"order_id": order["order_id"]}, "id": "refund-1"}
         return ToolPlan(
             tool_calls=[action],
             requested_actions=[action],
             order_id=order["order_id"],
-            steps=["request_refund"],
         )
 
     def respond(self, context: ResponseContext) -> str:
@@ -459,14 +436,12 @@ class CancelAfterObservationReasoner:
                 ],
                 order_id=2468,
                 requires_replan_after_tools=True,
-                steps=["order_lookup"],
             )
         action = {"name": "request_cancel_order", "args": {"order_id": 2468}, "id": "cancel-1"}
         return ToolPlan(
             tool_calls=[action],
             requested_actions=[action],
             order_id=2468,
-            steps=["request_cancel_order"],
         )
 
     def respond(self, context: ResponseContext) -> str:
@@ -475,7 +450,7 @@ class CancelAfterObservationReasoner:
 
 class NoToolMemoryWriteReasoner:
     def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
-        return ToolPlan(reasoning="I should remember the refund preference.")
+        return ToolPlan()
 
     def respond(self, context: ResponseContext) -> str:
         return "LLM guessed memory response"
@@ -558,7 +533,6 @@ class WarmClarificationReasoner:
             requested_actions=[action],
             customer_id=state_snapshot.get("active_customer_id"),
             order_id=2222,
-            steps=["request_log_complaint"],
         )
 
     def respond(self, context: ResponseContext) -> str:
@@ -602,8 +576,6 @@ class ActionRequestReasoner:
                 customer_id=state_snapshot.get("active_customer_id"),
                 order_id=self.order_id,
                 requires_replan_after_tools=True,
-                steps=["order_lookup"],
-                reasoning="Verifier requested order lookup before mutation.",
             )
 
         tool_calls = self._tool_calls(state_snapshot.get("active_customer_id"))
@@ -615,7 +587,6 @@ class ActionRequestReasoner:
             memory_value=self.memory_value,
             tool_calls=tool_calls,
             requested_actions=tool_calls,
-            reasoning=f"Planner requested {self.request_type}.",
         )
 
     def respond(self, context: ResponseContext) -> str:
@@ -686,7 +657,6 @@ class DirectMutationReasoner:
             issue=args.get("issue"),
             memory_key=args.get("key"),
             memory_value=args.get("value"),
-            steps=[self.action_name],
         )
 
     def respond(self, context: ResponseContext) -> str:
@@ -1005,17 +975,17 @@ def test_ambiguous_order_reference_asks_before_complaint() -> None:
     assert "order_id" in response.missing_slots
 
 
-def test_strong_pronoun_reference_runs_lookup_before_cancel() -> None:
+def test_active_order_reference_runs_lookup_before_cancel() -> None:
     repository = build_repository()
-    agent = CustomerServiceAgent(PronounCancelReasoner(), repository)
+    agent = CustomerServiceAgent(ActiveOrderCancelReasoner(), repository)
 
-    agent.trace("pronoun-cancel", "Check order 2468", customer_id=7)
-    response, updates = agent.trace("pronoun-cancel", "Cancel it", customer_id=7)
+    agent.trace("active-order-cancel", "Check order 2468", customer_id=7)
+    response, updates = agent.trace("active-order-cancel", "Cancel it", customer_id=7)
 
     planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
     assert planner_updates[0]["order_reference"] == {
         "order_id": 2468,
-        "source": "pronoun",
+        "source": "explicit",
         "confidence": "high",
     }
     assert [call["name"] for call in planner_updates[1]["tool_calls"]] == ["order_lookup"]
@@ -1118,9 +1088,6 @@ def test_successful_mutations_use_responder_instead_of_deterministic_templates()
     assert cancel_response.response == "LLM guessed cancel response"
     assert complaint_response.response == "LLM guessed mutation response"
     assert memory_response.response == "LLM guessed mutation response"
-    assert cancel_response.response != "Cancellation request submitted for order 2468."
-    assert complaint_response.response != "Complaint logged for order 7890."
-    assert memory_response.response != "Memory updated: contact_preference."
 
 def test_profile_query_does_not_include_stale_order_result() -> None:
     repository = build_repository()

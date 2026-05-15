@@ -18,8 +18,6 @@ def summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, A
             "tool_calls": update.get("tool_calls", []),
             "requested_actions": update.get("requested_actions", []),
             "requires_replan_after_tools": update.get("requires_replan_after_tools", False),
-            "plan_steps": update.get("plan_steps", []),
-            "reasoning": update.get("reasoning"),
         }
     if node_name in {"read_tools", "actions"}:
         tool_results = update.get("tool_results", {})
@@ -44,7 +42,6 @@ def summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, A
             "policy_errors": update.get("policy_errors", []),
             "tool_result_keys": list(tool_results.keys()),
             "requested_actions": update.get("requested_actions", []),
-            "reasoning": update.get("reasoning"),
         }
     if node_name == "respond":
         return {
