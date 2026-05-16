@@ -26,7 +26,6 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
         state_snapshot = {
             "active_customer_id": state.get("active_customer_id"),
             "active_order_id": state.get("active_order_id"),
-            "order_reference": state.get("order_reference"),
             "issue": state.get("issue"),
             "tool_results": state.get("tool_results", {}),
             "planner_feedback": planner_feedback,
@@ -34,34 +33,22 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
             "max_react_iterations": state.get("max_react_iterations") or max_react_iterations,
         }
         plan = reasoner.plan(str(last_message), state_snapshot)
-        answer_after_read = _has_control_call(plan, "answer_after_read")
         plan = prepare_plan(plan, state_snapshot)
-        next_order_reference = _next_order_reference(
-            plan.order_reference.model_dump(),
-            state.get("order_reference", {}),
-            has_requested_actions=bool(plan.requested_actions),
-        )
         next_customer_id = (
             plan.customer_id if plan.customer_id is not None else state.get("active_customer_id")
         )
-        next_order_id = (
-            next_order_reference.get("order_id")
-            if next_order_reference.get("confidence") == "high"
-            and next_order_reference.get("order_id") is not None
-            else state.get("active_order_id")
-        )
+        next_order_id = plan.order_id if plan.order_id is not None else state.get("active_order_id")
         return {
             **_reset_turn_outputs(
                 max_react_iterations=state.get("max_react_iterations") or max_react_iterations,
             ),
             "active_customer_id": next_customer_id,
             "active_order_id": next_order_id,
-            "order_reference": next_order_reference,
             "issue": plan.issue,
             "memory_candidate": plan.memory_candidate.model_dump(),
             "tool_calls": plan.tool_calls,
             "requested_actions": plan.requested_actions,
-            "answer_after_read": answer_after_read,
+            "continue_after_read": plan.continue_after_read,
             "tool_results": state.get("tool_results", {}),
             "react_iterations": react_iterations,
         }
@@ -198,35 +185,14 @@ def _needs_replan_after_read_tools(state: AgentState) -> bool:
 
     if state.get("requested_actions"):
         return False
-    if state.get("answer_after_read"):
-        return False
 
-    return bool(state.get("tool_calls"))
+    return bool(state.get("tool_calls")) and bool(state.get("continue_after_read", True))
 
 
 def _read_recent_memory(repository, customer_id: int | None) -> list[dict[str, Any]]:
     if customer_id is None:
         return []
     return repository.read_memories(customer_id)[:5]
-
-
-def _next_order_reference(
-    plan_reference: dict[str, Any],
-    previous_reference: dict[str, Any],
-    *,
-    has_requested_actions: bool,
-) -> dict[str, Any]:
-    if plan_reference.get("order_id") is not None:
-        return plan_reference
-    if not has_requested_actions and previous_reference.get("order_id") is not None:
-        return dict(previous_reference)
-    return plan_reference
-
-
-def _has_control_call(plan, name: str) -> bool:
-    if plan is None:
-        return False
-    return any(call.get("name") == name for call in plan.tool_calls)
 
 
 def _reset_turn_outputs(*, max_react_iterations: int) -> dict[str, Any]:
@@ -307,11 +273,10 @@ def _new_turn_state(
     state = {
         "messages": [HumanMessage(content=message)],
         "issue": None,
-        "order_reference": {"order_id": None, "source": "none", "confidence": "low"},
         "memory_candidate": {},
         "tool_calls": [],
         "requested_actions": [],
-        "answer_after_read": False,
+        "continue_after_read": True,
         "tool_results": {},
         "verification_decision": {},
         "verified_facts": {},

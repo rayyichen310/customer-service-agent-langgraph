@@ -140,7 +140,7 @@ class ReadThenStopReasoner:
         return str(context.active_order_id)
 
 
-class ReadThenAnswerReasoner:
+class ReadWithoutContinuationReasoner:
     def __init__(self) -> None:
         self.plan_calls = 0
 
@@ -148,8 +148,11 @@ class ReadThenAnswerReasoner:
         self.plan_calls += 1
         return ToolPlan(
             tool_calls=[
-                {"name": "order_lookup", "args": {"order_id": 7890}, "id": "lookup-1"},
-                {"name": "answer_after_read", "args": {}, "id": "answer-1"},
+                {
+                    "name": "order_lookup",
+                    "args": {"order_id": 7890, "continue_after_read": False},
+                    "id": "lookup-1",
+                },
             ],
         )
 
@@ -676,11 +679,7 @@ def test_refund_uses_react_loop_before_action() -> None:
     assert [action["name"] for action in planner_updates[1]["requested_actions"]] == [
         "propose_refund"
     ]
-    assert planner_updates[0]["order_reference"] == {
-        "order_id": 7890,
-        "source": "explicit",
-        "confidence": "high",
-    }
+    assert planner_updates[0]["active_order_id"] == 7890
 
     assert reasoner.plan_snapshots[0]["tool_results"] == {}
 
@@ -765,7 +764,7 @@ def test_lookup_only_planner_does_not_fabricate_refund_action() -> None:
     assert repository.get_order(7890)["status"] == "delivered"
 
 
-def test_read_then_stop_preserves_order_reference_without_action() -> None:
+def test_read_then_stop_preserves_active_order_without_action() -> None:
     repository = build_repository()
     reasoner = ReadThenStopReasoner()
     agent = CustomerServiceAgent(reasoner, repository)
@@ -773,18 +772,15 @@ def test_read_then_stop_preserves_order_reference_without_action() -> None:
     response, updates = agent.trace("read-then-stop", "Where is my order 7890?", customer_id=7)
 
     planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
-    assert planner_updates[-1]["order_reference"] == {
-        "order_id": 7890,
-        "source": "explicit",
-        "confidence": "high",
-    }
+    assert reasoner.plan_calls == 2
+    assert planner_updates[-1]["active_order_id"] == 7890
     assert response.order_id == 7890
     assert response.response == "7890"
 
 
-def test_answer_after_read_routes_to_response_without_replanning() -> None:
+def test_continue_after_read_false_routes_to_response_without_replanning() -> None:
     repository = build_repository()
-    reasoner = ReadThenAnswerReasoner()
+    reasoner = ReadWithoutContinuationReasoner()
     agent = CustomerServiceAgent(reasoner, repository)
 
     response, updates = agent.trace("read-then-answer", "Where is my order 7890?", customer_id=7)
@@ -994,7 +990,7 @@ def test_complaint_with_issue_logs_complaint() -> None:
     assert "damaged" in response.tool_results["complaint"]["issue"].lower()
 
 
-def test_ambiguous_order_reference_asks_before_complaint() -> None:
+def test_ambiguous_order_asks_before_complaint() -> None:
     repository = build_repository()
     agent = CustomerServiceAgent(SequentialAmbiguousComplaintReasoner(), repository)
 
@@ -1004,13 +1000,14 @@ def test_ambiguous_order_reference_asks_before_complaint() -> None:
     response, updates = agent.trace("ambiguous-order", "My order is late again", customer_id=7)
 
     planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
-    assert planner_updates[-1]["order_reference"]["confidence"] == "low"
+    assert planner_updates[-1]["active_order_id"] == 7890
+    assert planner_updates[-1]["requested_actions"][0]["args"].get("order_id") is None
     assert response.verification_decision["decision"] == "ask_user"
     assert "complaint" not in response.tool_results
     assert "order_id" in response.verification_decision.get("missing_slots", [])
 
 
-def test_active_order_reference_runs_lookup_before_cancel() -> None:
+def test_active_order_action_runs_lookup_before_cancel() -> None:
     repository = build_repository()
     agent = CustomerServiceAgent(ActiveOrderCancelReasoner(), repository)
 
@@ -1018,11 +1015,7 @@ def test_active_order_reference_runs_lookup_before_cancel() -> None:
     response, updates = agent.trace("active-order-cancel", "Cancel it", customer_id=7)
 
     planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
-    assert planner_updates[0]["order_reference"] == {
-        "order_id": 2468,
-        "source": "explicit",
-        "confidence": "high",
-    }
+    assert planner_updates[0]["active_order_id"] == 2468
     assert [call["name"] for call in planner_updates[1]["tool_calls"]] == ["order_lookup"]
     assert response.verification_decision["decision"] == "proceed_to_action"
     assert response.tool_results["cancelled_order"]["order_id"] == 2468

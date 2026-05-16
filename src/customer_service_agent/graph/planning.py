@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from customer_service_agent.graph.tools import ACTION_TOOL_NAMES, CONTROL_TOOL_NAMES
+from customer_service_agent.graph.tools import ACTION_TOOL_NAMES
 from customer_service_agent.models import (
     MEMORY_TYPES,
     WRITABLE_MEMORY_TYPES,
     MemoryWriteCandidate,
-    OrderReference,
 )
 from customer_service_agent.reasoning import ToolPlan
 
@@ -25,12 +24,17 @@ def prepare_plan(
         first_int_arg(plan.requested_actions, "customer_id"),
         state_snapshot.get("active_customer_id"),
     )
-    plan.order_reference = infer_order_reference(plan)
+    plan.order_id = first_not_none(
+        plan.order_id,
+        first_int_arg(plan.tool_calls, "order_id"),
+        first_int_arg(plan.requested_actions, "order_id"),
+    )
 
     plan.issue = plan.issue or first_str_arg(plan.requested_actions, "issue") or first_str_arg(
         plan.tool_calls, "issue"
     )
     plan.memory_candidate = normalize_memory_candidate(plan)
+    plan.continue_after_read = infer_continue_after_read(plan)
 
     plan.requested_actions = normalize_requested_actions(plan)
     plan.tool_calls = normalize_read_tools(plan)
@@ -56,8 +60,8 @@ def normalize_requested_actions(
         name = str(action.get("name") or "")
         args = dict(action.get("args") or {})
         if name in {"propose_refund", "propose_cancel_order", "propose_log_complaint"}:
-            if args.get("order_id") is None and plan.order_reference.order_id is not None:
-                args["order_id"] = plan.order_reference.order_id
+            if args.get("order_id") is None and plan.order_id is not None:
+                args["order_id"] = plan.order_id
         if name == "propose_log_complaint":
             if args.get("customer_id") is None and plan.customer_id is not None:
                 args["customer_id"] = plan.customer_id
@@ -76,37 +80,35 @@ def normalize_requested_actions(
 
 def normalize_read_tools(plan: ToolPlan) -> list[dict[str, Any]]:
     read_tools = [
-        call
-        for call in plan.tool_calls
-        if call.get("name") not in ACTION_TOOL_NAMES
-        and call.get("name") not in CONTROL_TOOL_NAMES
+        call for call in plan.tool_calls if call.get("name") not in ACTION_TOOL_NAMES
     ]
     for call in read_tools:
         args = call.setdefault("args", {})
+        args.pop("continue_after_read", None)
         if (
             call.get("name") == "order_lookup"
             and args.get("order_id") is None
-            and plan.order_reference.order_id is not None
+            and plan.order_id is not None
         ):
-            args["order_id"] = plan.order_reference.order_id
+            args["order_id"] = plan.order_id
     return read_tools
 
 
-def infer_order_reference(plan: ToolPlan) -> OrderReference:
-    if plan.order_reference.order_id is not None and plan.order_reference.confidence == "high":
-        return plan.order_reference
-
-    explicit_order_id = first_not_none(
-        first_int_arg(plan.tool_calls, "order_id"),
-        first_int_arg(plan.requested_actions, "order_id"),
-    )
-    if explicit_order_id is not None:
-        return OrderReference(order_id=explicit_order_id, source="explicit", confidence="high")
-
-    if plan.order_reference.order_id is not None:
-        return plan.order_reference
-
-    return OrderReference(source="none", confidence="low")
+def infer_continue_after_read(plan: ToolPlan) -> bool:
+    values = [
+        value
+        for value in (
+            bool_or_none((call.get("args") or {}).get("continue_after_read"))
+            for call in plan.tool_calls
+            if call.get("name") not in ACTION_TOOL_NAMES
+        )
+        if value is not None
+    ]
+    if True in values:
+        return True
+    if False in values:
+        return False
+    return plan.continue_after_read
 
 
 def normalize_memory_candidate(plan: ToolPlan) -> MemoryWriteCandidate:
@@ -162,6 +164,18 @@ def int_or_none(value: Any) -> int | None:
         return value
     if isinstance(value, str) and value.isdigit():
         return int(value)
+    return None
+
+
+def bool_or_none(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "true":
+            return True
+        if normalized == "false":
+            return False
     return None
 
 

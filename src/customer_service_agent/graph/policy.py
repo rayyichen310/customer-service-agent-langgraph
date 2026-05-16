@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from customer_service_agent.models import MemoryWriteCandidate, OrderReference, VerifierOutput
+from customer_service_agent.models import MemoryWriteCandidate, VerifierOutput
 
 
 @dataclass(frozen=True)
@@ -40,7 +40,7 @@ ACTION_SLOT_REQUIREMENTS = {
 }
 
 CUSTOMER_PROFILE_NOT_FOUND = "CUSTOMER_PROFILE_NOT_FOUND"
-ORDER_REFERENCE_AMBIGUOUS = "ORDER_REFERENCE_AMBIGUOUS"
+ORDER_ID_MISSING = "ORDER_ID_MISSING"
 CUSTOMER_ID_MISSING = "CUSTOMER_ID_MISSING"
 ORDER_LOOKUP_REQUIRED_BEFORE_MUTATION = "ORDER_LOOKUP_REQUIRED_BEFORE_MUTATION"
 ORDER_DETAILS_MISSING_AFTER_LOOKUP = "ORDER_DETAILS_MISSING_AFTER_LOOKUP"
@@ -61,7 +61,7 @@ def verify_policy(state: dict[str, Any], *, max_react_iterations: int) -> dict[s
     action_names = {action.get("name") for action in requested_actions}
     tool_results = dict(state.get("tool_results", {}))
     order = tool_results.get("order")
-    order_reference = OrderReference(**(state.get("order_reference") or {}))
+    action_order_id = first_action_int_arg(requested_actions, "order_id")
     active_customer_id = state.get("active_customer_id")
     order_lookup_result = tool_results.get("order_lookup")
     called_order_lookup = any(
@@ -75,7 +75,7 @@ def verify_policy(state: dict[str, Any], *, max_react_iterations: int) -> dict[s
         return verify_order_mutation(
             requested_actions,
             order=order,
-            order_reference=order_reference,
+            order_id=action_order_id,
             active_customer_id=active_customer_id,
             called_order_lookup=called_order_lookup,
             can_replan=can_replan,
@@ -86,7 +86,7 @@ def verify_policy(state: dict[str, Any], *, max_react_iterations: int) -> dict[s
         return verify_complaint(
             requested_actions,
             planned_issue=state.get("issue"),
-            order_reference=order_reference,
+            order_id=action_order_id,
             active_customer_id=active_customer_id,
             tool_results=tool_results,
         )
@@ -118,7 +118,7 @@ def verify_order_mutation(
     requested_actions: list[dict[str, Any]],
     *,
     order: dict[str, Any] | None,
-    order_reference: OrderReference,
+    order_id: int | None,
     active_customer_id: int | None,
     called_order_lookup: bool,
     can_replan: bool,
@@ -128,7 +128,7 @@ def verify_order_mutation(
     missing_slots = missing_slots_for_requirements(
         ACTION_SLOT_REQUIREMENTS["order_mutation"],
         active_customer_id=active_customer_id,
-        order_reference=order_reference,
+        order_id=order_id,
         order=order,
     )
 
@@ -138,10 +138,10 @@ def verify_order_mutation(
             missing_slots,
             [],
             list(action_names),
-            ORDER_REFERENCE_AMBIGUOUS,
+            ORDER_ID_MISSING,
             tool_results,
-            context={"order_reference": order_reference.model_dump()},
-            planner_feedback_code=ORDER_REFERENCE_AMBIGUOUS,
+            context={},
+            planner_feedback_code=ORDER_ID_MISSING,
         )
 
     if active_customer_id is None:
@@ -167,7 +167,7 @@ def verify_order_mutation(
                     policy_error(
                         "ORDER_NOT_FOUND",
                         blocked_action=first_action_name(action_names),
-                        order_id=order_reference.order_id,
+                        order_id=order_id,
                         reason_code=ORDER_NOT_FOUND,
                     )
                 ],
@@ -181,7 +181,7 @@ def verify_order_mutation(
                 None,
                 tool_results,
                 planner_feedback_code=ORDER_LOOKUP_REQUIRED_BEFORE_MUTATION,
-                context={"order_id": order_reference.order_id},
+                context={"order_id": order_id},
             )
         return _decision(
             "ask_user",
@@ -191,7 +191,7 @@ def verify_order_mutation(
             ORDER_DETAILS_MISSING_AFTER_REPLAN_LIMIT,
             tool_results,
             planner_feedback_code=ORDER_DETAILS_MISSING_AFTER_REPLAN_LIMIT,
-            context={"order_id": order_reference.order_id},
+            context={"order_id": order_id},
         )
 
     if order["customer_id"] != active_customer_id:
@@ -245,7 +245,7 @@ def verify_complaint(
     requested_actions: list[dict[str, Any]],
     *,
     planned_issue: str | None,
-    order_reference: OrderReference,
+    order_id: int | None,
     active_customer_id: int | None,
     tool_results: dict[str, Any],
 ) -> dict[str, Any]:
@@ -253,7 +253,7 @@ def verify_complaint(
     missing_slots = missing_slots_for_requirements(
         ACTION_SLOT_REQUIREMENTS["propose_log_complaint"],
         active_customer_id=active_customer_id,
-        order_reference=order_reference,
+        order_id=order_id,
         issue=issue,
     )
 
@@ -263,10 +263,10 @@ def verify_complaint(
             missing_slots,
             [],
             ["propose_log_complaint"],
-            ORDER_REFERENCE_AMBIGUOUS,
+            ORDER_ID_MISSING,
             tool_results,
-            context={"order_reference": order_reference.model_dump()},
-            planner_feedback_code=ORDER_REFERENCE_AMBIGUOUS,
+            context={},
+            planner_feedback_code=ORDER_ID_MISSING,
         )
     if "complaint_issue" in missing_slots:
         return _decision(
@@ -276,7 +276,7 @@ def verify_complaint(
             ["propose_log_complaint"],
             COMPLAINT_ISSUE_MISSING,
             tool_results,
-            context={"order_id": order_reference.order_id},
+            context={"order_id": order_id},
             planner_feedback_code=COMPLAINT_ISSUE_MISSING,
         )
     if active_customer_id is None:
@@ -293,7 +293,7 @@ def verify_complaint(
         "name": "propose_log_complaint",
         "args": {
             "customer_id": active_customer_id,
-            "order_id": order_reference.order_id,
+            "order_id": order_id,
             "issue": issue,
         },
         "id": "verified-propose_log_complaint",
@@ -393,7 +393,7 @@ def missing_slots_for_requirements(
     requirements: tuple[str, ...],
     *,
     active_customer_id: int | None = None,
-    order_reference: OrderReference | None = None,
+    order_id: int | None = None,
     order: dict[str, Any] | None = None,
     issue: str | None = None,
     memory_candidate: MemoryWriteCandidate | None = None,
@@ -404,11 +404,7 @@ def missing_slots_for_requirements(
     for requirement in requirements:
         if requirement == "customer_id" and active_customer_id is None:
             missing.append("customer_id")
-        elif requirement == "order_id" and (
-            order_reference is None
-            or order_reference.order_id is None
-            or order_reference.confidence != "high"
-        ):
+        elif requirement == "order_id" and order_id is None:
             missing.append("order_id")
         elif requirement == "order_record" and not order:
             missing.extend(["order_status", "order_customer_id"])
@@ -441,6 +437,14 @@ def first_action_arg(actions: list[dict[str, Any]], key: str) -> str | None:
     for action in actions:
         value = (action.get("args") or {}).get(key)
         if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def first_action_int_arg(actions: list[dict[str, Any]], key: str) -> int | None:
+    for action in actions:
+        value = int_or_none((action.get("args") or {}).get(key))
+        if value is not None:
             return value
     return None
 

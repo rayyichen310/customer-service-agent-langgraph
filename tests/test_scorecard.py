@@ -33,14 +33,14 @@ def test_scorecard_assertions_fail_bad_refund_record() -> None:
     assert run_scorecard.scorecard_exit_code([record]) == 1
 
 
-def test_scorecard_planner_iterations_include_order_reference_metadata_without_slots() -> None:
+def test_scorecard_planner_iterations_include_active_order_without_slots() -> None:
     node_trace = [
         {
             "node": "planner",
             "state": {
                 "tool_calls": [],
                 "requested_actions": [],
-                "order_reference": {"order_id": 2222, "source": "explicit", "confidence": "high"},
+                "active_order_id": 2222,
             },
         }
     ]
@@ -50,6 +50,6 @@ def test_scorecard_planner_iterations_include_order_reference_metadata_without_s
             "iteration": 1,
             "tool_calls": [],
             "requested_actions": [],
-            "order_reference": {"order_id": 2222, "source": "explicit", "confidence": "high"},
+            "order_id": 2222,
         }
     ]

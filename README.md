@@ -11,7 +11,7 @@ This project implements the PDF specification with a `LangGraph + ReAct + MySQL`
 ## Features
 
 - Tool-call planning for order tracking, profile lookup, refunds, complaints, and memory actions
-- Structured planning with order-reference confidence, missing-slot verification, and bounded replanning before writes
+- Structured planning with explicit order IDs, missing-slot verification, and bounded replanning before writes
 - ReAct-style workflow with conditional read tools before verifier/action execution
 - Short-term memory through LangGraph checkpointer
 - Long-term memory through MySQL tables: `customer_memory` and `complaints`
@@ -139,7 +139,7 @@ The runtime graph uses model-generated tool calls with guarded write actions:
 planner -> read_tools -> planner/verifier -> actions/respond
 ```
 
-The planner calls tools such as `order_lookup` and action proposals such as `propose_refund`. Read tools run only when the plan includes read calls; otherwise the plan goes directly to the verifier. The verifier checks database truth, required slots, order-reference confidence, and business rules, and only `proceed_to_action` proposals mutate MySQL.
+The planner calls tools such as `order_lookup` and action proposals such as `propose_refund`. Read tools run only when the plan includes read calls; otherwise the plan goes directly to the verifier. The verifier checks database truth, required slots, explicit order IDs, and business rules, and only `proceed_to_action` proposals mutate MySQL.
 
 This customer-service agent avoids hardcoded customer-facing response mappings. Instead, it uses structured planning, missing-slot verification, and bounded replanning to resolve ambiguous or incomplete information before executing customer-impacting actions.
 

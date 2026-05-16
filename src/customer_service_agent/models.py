@@ -93,12 +93,6 @@ class ChatResponse(BaseModel):
     verification_decision: dict[str, Any] = Field(default_factory=dict)
 
 
-class OrderReference(BaseModel):
-    order_id: int | None = None
-    source: Literal["explicit", "none"] = "none"
-    confidence: Literal["high", "medium", "low"] = "low"
-
-
 class MemoryWriteCandidate(BaseModel):
     should_write: bool = False
     memory_type: MemoryType = "unclear"
@@ -127,12 +121,11 @@ class VerifierOutput(BaseModel):
 class AgentState(MessagesState):
     active_customer_id: int | None
     active_order_id: int | None
-    order_reference: dict[str, Any]
     issue: str | None
     memory_candidate: dict[str, Any]
     tool_calls: list[dict[str, Any]]
     requested_actions: list[dict[str, Any]]
-    answer_after_read: bool
+    continue_after_read: bool
     tool_results: dict[str, Any]
     verification_decision: dict[str, Any]
     verified_facts: dict[str, Any]

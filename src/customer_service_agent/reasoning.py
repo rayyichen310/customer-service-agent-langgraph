@@ -9,7 +9,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
 from customer_service_agent.config import Settings
-from customer_service_agent.models import MemoryWriteCandidate, OrderReference
+from customer_service_agent.models import MemoryWriteCandidate
 from customer_service_agent.graph.tools import (
     PLANNER_TOOLS,
 )
@@ -30,8 +30,9 @@ class ResponseContext:
 class ToolPlan:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     requested_actions: list[dict[str, Any]] = field(default_factory=list)
+    continue_after_read: bool = True
     customer_id: int | None = None
-    order_reference: OrderReference = field(default_factory=OrderReference)
+    order_id: int | None = None
     issue: str | None = None
     memory_candidate: MemoryWriteCandidate = field(default_factory=MemoryWriteCandidate)
 
@@ -50,7 +51,6 @@ class StructuredChatReasoner(Reasoner):
             {
                 "active_customer_id": state_snapshot.get("active_customer_id"),
                 "active_order_id": state_snapshot.get("active_order_id"),
-                "order_reference": state_snapshot.get("order_reference"),
                 "known_issue": state_snapshot.get("issue"),
                 "observations": state_snapshot.get("tool_results", {}),
                 "planner_feedback": state_snapshot.get("planner_feedback", {}),

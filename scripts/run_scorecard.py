@@ -237,7 +237,7 @@ def planner_iterations(node_trace: list[dict[str, Any]]) -> list[dict[str, Any]]
                     action.get("name", "")
                     for action in state.get("requested_actions", [])
                 ],
-                "order_reference": state.get("order_reference"),
+                "order_id": state.get("active_order_id"),
             }
         )
     return iterations
@@ -452,8 +452,7 @@ def log_node_trace(quiet: bool, node_trace: list[dict[str, Any]]) -> None:
         print(f"  node: {node}", file=sys.stderr, flush=True)
         if node == "planner":
             print(
-                f"    customer={state.get('active_customer_id')} order={state.get('active_order_id')} "
-                f"order_reference={state.get('order_reference')}",
+                f"    customer={state.get('active_customer_id')} order={state.get('active_order_id')}",
                 file=sys.stderr,
                 flush=True,
             )

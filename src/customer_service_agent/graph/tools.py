@@ -11,38 +11,29 @@ ACTION_TOOL_NAMES = {
     "propose_log_complaint",
     "propose_write_memory",
 }
-CONTROL_TOOL_NAMES = {
-    "answer_after_read",
-}
 
 
 @tool("order_lookup")
-def order_lookup(order_id: int) -> str:
+def order_lookup(order_id: int, continue_after_read: bool = True) -> str:
     """Read order details such as customer, product, status, and dates by order ID."""
     return "schema only"
 
 
 @tool("customer_profile")
-def customer_profile(customer_id: int) -> str:
+def customer_profile(customer_id: int, continue_after_read: bool = True) -> str:
     """Read customer identity and contact details by customer ID."""
     return "schema only"
 
 
 @tool("read_customer_memory")
-def read_customer_memory(customer_id: int) -> str:
+def read_customer_memory(customer_id: int, continue_after_read: bool = True) -> str:
     """Read durable customer preferences and profile notes by customer ID."""
     return "schema only"
 
 
 @tool("read_customer_issue_history")
-def read_customer_issue_history(customer_id: int) -> str:
+def read_customer_issue_history(customer_id: int, continue_after_read: bool = True) -> str:
     """Read previous customer complaint records and summarized issue patterns by customer ID."""
-    return "schema only"
-
-
-@tool("answer_after_read")
-def answer_after_read() -> str:
-    """After the requested read tools return observations, answer the customer without another planning step."""
     return "schema only"
 
 
@@ -84,7 +75,6 @@ PLANNER_TOOLS = [
     customer_profile,
     read_customer_memory,
     read_customer_issue_history,
-    answer_after_read,
     propose_refund,
     propose_cancel_order,
     propose_log_complaint,

@@ -8,7 +8,6 @@ def summarize_node_update(node_name: str, update: dict[str, Any]) -> dict[str, A
         return {
             "active_customer_id": update.get("active_customer_id"),
             "active_order_id": update.get("active_order_id"),
-            "order_reference": update.get("order_reference"),
             "issue": update.get("issue"),
             "memory_candidate": update.get("memory_candidate"),
             "tool_calls": update.get("tool_calls", []),
