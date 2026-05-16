@@ -30,7 +30,7 @@ class ResponseContext:
 class ToolPlan:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     requested_actions: list[dict[str, Any]] = field(default_factory=list)
-    continue_after_read: bool = True
+    continue_after_read: bool = False
     customer_id: int | None = None
     order_id: int | None = None
     issue: str | None = None

@@ -14,25 +14,25 @@ ACTION_TOOL_NAMES = {
 
 
 @tool("order_lookup")
-def order_lookup(order_id: int, continue_after_read: bool = True) -> str:
+def order_lookup(order_id: int, continue_after_read: bool = False) -> str:
     """Read order details such as customer, product, status, and dates by order ID."""
     return "schema only"
 
 
 @tool("customer_profile")
-def customer_profile(customer_id: int, continue_after_read: bool = True) -> str:
+def customer_profile(customer_id: int, continue_after_read: bool = False) -> str:
     """Read customer identity and contact details by customer ID."""
     return "schema only"
 
 
 @tool("read_customer_memory")
-def read_customer_memory(customer_id: int, continue_after_read: bool = True) -> str:
+def read_customer_memory(customer_id: int, continue_after_read: bool = False) -> str:
     """Read durable customer preferences and profile notes by customer ID."""
     return "schema only"
 
 
 @tool("read_customer_issue_history")
-def read_customer_issue_history(customer_id: int, continue_after_read: bool = True) -> str:
+def read_customer_issue_history(customer_id: int, continue_after_read: bool = False) -> str:
     """Read previous customer complaint records and summarized issue patterns by customer ID."""
     return "schema only"
 

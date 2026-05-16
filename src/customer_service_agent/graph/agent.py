@@ -186,7 +186,7 @@ def _needs_replan_after_read_tools(state: AgentState) -> bool:
     if state.get("requested_actions"):
         return False
 
-    return bool(state.get("tool_calls")) and bool(state.get("continue_after_read", True))
+    return bool(state.get("tool_calls")) and bool(state.get("continue_after_read", False))
 
 
 def _read_recent_memory(repository, customer_id: int | None) -> list[dict[str, Any]]:
@@ -276,7 +276,7 @@ def _new_turn_state(
         "memory_candidate": {},
         "tool_calls": [],
         "requested_actions": [],
-        "continue_after_read": True,
+        "continue_after_read": False,
         "tool_results": {},
         "verification_decision": {},
         "verified_facts": {},

@@ -81,14 +81,20 @@ class RefundAfterObservationReasoner:
     def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
         self.plan_snapshots.append(state_snapshot)
         order = state_snapshot.get("tool_results", {}).get("order")
+        action = {"name": "propose_refund", "args": {"order_id": 7890}, "id": "refund-1"}
         if not order:
             return ToolPlan(
                 tool_calls=[
-                    {"name": "order_lookup", "args": {"order_id": 7890}, "id": "lookup-1"}
+                    {
+                        "name": "order_lookup",
+                        "args": {"order_id": 7890},
+                        "id": "lookup-1",
+                    },
+                    action,
                 ],
+                requested_actions=[action],
             )
 
-        action = {"name": "propose_refund", "args": {"order_id": 7890}, "id": "refund-1"}
         return ToolPlan(
             tool_calls=[action],
             requested_actions=[action],
@@ -131,7 +137,11 @@ class ReadThenStopReasoner:
         if self.plan_calls == 1:
             return ToolPlan(
                 tool_calls=[
-                    {"name": "order_lookup", "args": {"order_id": 7890}, "id": "lookup-1"}
+                    {
+                        "name": "order_lookup",
+                        "args": {"order_id": 7890},
+                        "id": "lookup-1",
+                    }
                 ],
             )
         return ToolPlan()
@@ -199,8 +209,14 @@ class ActionFirstThenLookupReasoner:
         if not state_snapshot.get("tool_results", {}).get("order"):
             return ToolPlan(
                 tool_calls=[
-                    {"name": "order_lookup", "args": {"order_id": 7890}, "id": "lookup-1"}
+                    {
+                        "name": "order_lookup",
+                        "args": {"order_id": 7890},
+                        "id": "lookup-1",
+                    },
+                    action,
                 ],
+                requested_actions=[action],
             )
         return ToolPlan(
             tool_calls=[action],
@@ -218,7 +234,11 @@ class CustomerReadReasoner:
         if "order" in user_message.lower():
             return ToolPlan(
                 tool_calls=[
-                    {"name": "order_lookup", "args": {"order_id": 7890}, "id": "lookup-1"}
+                    {
+                        "name": "order_lookup",
+                        "args": {"order_id": 7890},
+                        "id": "lookup-1",
+                    }
                 ],
             )
         if "memory" in user_message.lower():
@@ -297,7 +317,11 @@ class SequentialAmbiguousComplaintReasoner:
         if self.plan_calls == 1:
             return ToolPlan(
                 tool_calls=[
-                    {"name": "order_lookup", "args": {"order_id": 7890}, "id": "lookup-1"}
+                    {
+                        "name": "order_lookup",
+                        "args": {"order_id": 7890},
+                        "id": "lookup-1",
+                    }
                 ],
             )
         if self.plan_calls == 2:
@@ -305,7 +329,9 @@ class SequentialAmbiguousComplaintReasoner:
                 tool_calls=[
                     {
                         "name": "customer_profile",
-                        "args": {"customer_id": state_snapshot.get("active_customer_id")},
+                        "args": {
+                            "customer_id": state_snapshot.get("active_customer_id"),
+                        },
                         "id": "profile-1",
                     }
                 ],
@@ -316,7 +342,9 @@ class SequentialAmbiguousComplaintReasoner:
                 tool_calls=[
                     {
                         "name": "read_customer_issue_history",
-                        "args": {"customer_id": state_snapshot.get("active_customer_id")},
+                        "args": {
+                            "customer_id": state_snapshot.get("active_customer_id"),
+                        },
                         "id": "issue-history-1",
                     }
                 ],
@@ -356,14 +384,23 @@ class ActiveOrderCancelReasoner:
             "cancel" in normalized
             and (state_snapshot.get("planner_feedback") or {}).get("code") == "ORDER_LOOKUP_REQUIRED_BEFORE_MUTATION"
         ):
+            action = {
+                "name": "propose_cancel_order",
+                "args": {"order_id": state_snapshot.get("active_order_id")},
+                "id": "cancel-1",
+            }
             return ToolPlan(
                 tool_calls=[
                     {
                         "name": "order_lookup",
-                        "args": {"order_id": state_snapshot.get("active_order_id")},
+                        "args": {
+                            "order_id": state_snapshot.get("active_order_id"),
+                        },
                         "id": "lookup-2",
-                    }
+                    },
+                    action,
                 ],
+                requested_actions=[action],
             )
         if "cancel" in normalized:
             action = {
@@ -426,16 +463,26 @@ class RefundByMessageReasoner:
     def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
         order_id = 5678 if "5678" in user_message else 7890
         order = state_snapshot.get("tool_results", {}).get("order")
+        action = {"name": "propose_refund", "args": {"order_id": order_id}, "id": "refund-1"}
         if not order:
             return ToolPlan(
                 tool_calls=[
-                    {"name": "order_lookup", "args": {"order_id": order_id}, "id": "lookup-1"}
+                    {
+                        "name": "order_lookup",
+                        "args": {"order_id": order_id},
+                        "id": "lookup-1",
+                    },
+                    action,
                 ],
+                requested_actions=[action],
             )
-        action = {"name": "propose_refund", "args": {"order_id": order["order_id"]}, "id": "refund-1"}
         return ToolPlan(
-            tool_calls=[action],
-            requested_actions=[action],
+            tool_calls=[
+                {"name": action["name"], "args": {"order_id": order["order_id"]}, "id": action["id"]}
+            ],
+            requested_actions=[
+                {"name": action["name"], "args": {"order_id": order["order_id"]}, "id": action["id"]}
+            ],
         )
 
     def respond(self, context: ResponseContext) -> str:
@@ -445,13 +492,19 @@ class RefundByMessageReasoner:
 class CancelAfterObservationReasoner:
     def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
         order = state_snapshot.get("tool_results", {}).get("order")
+        action = {"name": "propose_cancel_order", "args": {"order_id": 2468}, "id": "cancel-1"}
         if not order:
             return ToolPlan(
                 tool_calls=[
-                    {"name": "order_lookup", "args": {"order_id": 2468}, "id": "lookup-1"}
+                    {
+                        "name": "order_lookup",
+                        "args": {"order_id": 2468},
+                        "id": "lookup-1",
+                    },
+                    action,
                 ],
+                requested_actions=[action],
             )
-        action = {"name": "propose_cancel_order", "args": {"order_id": 2468}, "id": "cancel-1"}
         return ToolPlan(
             tool_calls=[action],
             requested_actions=[action],
@@ -575,15 +628,17 @@ class ActionRequestReasoner:
             and (state_snapshot.get("planner_feedback") or {}).get("code") == "ORDER_LOOKUP_REQUIRED_BEFORE_MUTATION"
             and not order
         ):
+            action_calls = self._tool_calls(state_snapshot.get("active_customer_id"))
+            lookup = {
+                "name": "order_lookup",
+                "args": {"order_id": self.order_id} if self.order_id is not None else {},
+                "id": "order_lookup-1",
+            }
             return ToolPlan(
-                tool_calls=[
-                    {
-                        "name": "order_lookup",
-                        "args": {"order_id": self.order_id} if self.order_id is not None else {},
-                        "id": "order_lookup-1",
-                    }
-                ],
+                tool_calls=[lookup, *action_calls],
+                requested_actions=action_calls,
                 customer_id=state_snapshot.get("active_customer_id"),
+                issue=self.issue,
             )
 
         tool_calls = self._tool_calls(state_snapshot.get("active_customer_id"))
@@ -673,10 +728,9 @@ def test_refund_uses_react_loop_before_action() -> None:
     response, updates = agent.trace("react-refund", "Refund order 7890 if delivered")
 
     planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
-    assert len(planner_updates) == 2
+    assert len(planner_updates) == 1
     assert [call["name"] for call in planner_updates[0]["tool_calls"]] == ["order_lookup"]
-    assert planner_updates[0]["requested_actions"] == []
-    assert [action["name"] for action in planner_updates[1]["requested_actions"]] == [
+    assert [action["name"] for action in planner_updates[0]["requested_actions"]] == [
         "propose_refund"
     ]
     assert planner_updates[0]["active_order_id"] == 7890
@@ -756,8 +810,8 @@ def test_lookup_only_planner_does_not_fabricate_refund_action() -> None:
 
     verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
 
-    assert reasoner.plan_calls == 3
-    assert [update["node"] for update in updates].count("planner") == 3
+    assert reasoner.plan_calls == 1
+    assert [update["node"] for update in updates].count("planner") == 1
     assert verifier_updates[-1]["requested_actions"] == []
     assert response.verification_decision["decision"] == "proceed_to_response"
     assert "refund" not in response.tool_results
@@ -772,7 +826,7 @@ def test_read_then_stop_preserves_active_order_without_action() -> None:
     response, updates = agent.trace("read-then-stop", "Where is my order 7890?", customer_id=7)
 
     planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
-    assert reasoner.plan_calls == 2
+    assert reasoner.plan_calls == 1
     assert planner_updates[-1]["active_order_id"] == 7890
     assert response.order_id == 7890
     assert response.response == "7890"
