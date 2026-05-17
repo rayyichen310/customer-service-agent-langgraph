@@ -258,7 +258,7 @@ def verify_complaint(
             "order_id": order_id,
             "issue": issue,
         },
-        "id": "verified-propose_log_complaint",
+        "id": first_action_id(requested_actions, "propose_log_complaint"),
     }
     return _decision(
         "proceed_to_action",
@@ -318,7 +318,7 @@ def verify_memory_write(
     action = {
         "name": "propose_write_memory",
         "args": {"key": key, "value": value},
-        "id": "verified-propose_write_memory",
+        "id": first_action_id(requested_actions, "propose_write_memory"),
     }
     return _decision(
         "proceed_to_action",
@@ -367,6 +367,15 @@ def first_action_int_arg(actions: list[dict[str, Any]], key: str) -> int | None:
         value = int_or_none((action.get("args") or {}).get(key))
         if value is not None:
             return value
+    return None
+
+
+def first_action_id(actions: list[dict[str, Any]], name: str) -> str | None:
+    for action in actions:
+        if action.get("name") == name:
+            action_id = action.get("id")
+            if isinstance(action_id, str) and action_id:
+                return action_id
     return None
 
 

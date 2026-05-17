@@ -6,9 +6,9 @@ from customer_service_agent.graph.tools import ACTION_TOOL_NAMES
 from customer_service_agent.reasoning import ToolPlan
 
 
-def split_tool_calls(plan):
+def split_tool_calls(plan: ToolPlan) -> ToolPlan:
     if plan is None:
-        return ToolPlan()
+        raise TypeError("reasoner.plan() must return ToolPlan, got None")
 
     action_calls: list[dict[str, Any]] = []
     read_calls: list[dict[str, Any]] = []
@@ -71,10 +71,4 @@ def continue_after_read(default: bool, explicit_flags: list[bool]) -> bool:
 def bool_or_none(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized == "true":
-            return True
-        if normalized == "false":
-            return False
     return None

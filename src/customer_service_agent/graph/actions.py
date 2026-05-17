@@ -48,7 +48,7 @@ def _request_order_mutation(
     args: dict[str, Any],
 ) -> None:
     result_key, repository_method = ORDER_MUTATION_ACTIONS[action_name]
-    order_id = _order_id(args, state)
+    order_id = _order_id(args)
     if order_id is None:
         return
 
@@ -65,8 +65,8 @@ def _propose_log_complaint(
     state: dict[str, Any],
     args: dict[str, Any],
 ) -> None:
-    customer_id = _customer_id(args, state)
-    order_id = _order_id(args, state)
+    customer_id = _customer_id(state)
+    order_id = _order_id(args)
     issue = args.get("issue")
     if customer_id is not None and issue:
         tool_results["complaint"] = repository.log_complaint(
@@ -83,7 +83,7 @@ def _propose_write_memory(
     state: dict[str, Any],
     args: dict[str, Any],
 ) -> None:
-    customer_id = _customer_id(args, state)
+    customer_id = _customer_id(state)
     key = args.get("key")
     value = args.get("value")
     if customer_id is not None and key and value:
@@ -94,9 +94,9 @@ def _propose_write_memory(
         )
 
 
-def _customer_id(args: dict[str, Any], state: dict[str, Any]) -> int | None:
+def _customer_id(state: dict[str, Any]) -> int | None:
     return state.get("authenticated_customer_id")
 
 
-def _order_id(args: dict[str, Any], state: dict[str, Any]) -> int | None:
+def _order_id(args: dict[str, Any]) -> int | None:
     return int_or_none(args.get("order_id"))
