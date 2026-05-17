@@ -8,7 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from customer_service_agent.graph.agent import CustomerServiceAgent
-from customer_service_agent.models import Base, Customer, CustomerMemory, MemoryWriteCandidate, Order
+from customer_service_agent.models import Base, Customer, CustomerMemory, Order
 from customer_service_agent.reasoning import ResponseContext, ToolPlan
 from customer_service_agent.repository import CustomerServiceRepository
 
@@ -103,7 +103,8 @@ class RefundAfterObservationReasoner:
     def respond(self, context: ResponseContext) -> str:
         if context.verification_decision.get("decision") == "ask_user":
             return context.verification_decision.get("reason_code") or "NEEDS_USER_INPUT"
-        return f"The refund request was submitted for order {context.active_order_id}."
+        order_id = context.verified_facts.get("order", {}).get("order_id")
+        return f"The refund request was submitted for order {order_id}."
 
 
 class LookupOnlyReasoner:
@@ -147,7 +148,7 @@ class ReadThenStopReasoner:
         return ToolPlan()
 
     def respond(self, context: ResponseContext) -> str:
-        return str(context.active_order_id)
+        return str(context.verified_facts.get("order", {}).get("order_id"))
 
 
 class ReadWithoutContinuationReasoner:
@@ -167,7 +168,7 @@ class ReadWithoutContinuationReasoner:
         )
 
     def respond(self, context: ResponseContext) -> str:
-        return str(context.active_order_id)
+        return str(context.verified_facts.get("order", {}).get("order_id"))
 
 
 class CombinedThenActionReasoner:
@@ -246,21 +247,19 @@ class CustomerReadReasoner:
                 tool_calls=[
                     {
                         "name": "read_customer_memory",
-                        "args": {"customer_id": state_snapshot.get("active_customer_id")},
+                        "args": {"customer_id": state_snapshot.get("authenticated_customer_id")},
                         "id": "memory-1",
                     }
                 ],
-                customer_id=state_snapshot.get("active_customer_id"),
             )
         return ToolPlan(
             tool_calls=[
                 {
                     "name": "customer_profile",
-                    "args": {"customer_id": state_snapshot.get("active_customer_id")},
+                    "args": {"customer_id": state_snapshot.get("authenticated_customer_id")},
                     "id": "profile-1",
                 }
             ],
-            customer_id=state_snapshot.get("active_customer_id"),
         )
 
     def respond(self, context: ResponseContext) -> str:
@@ -283,24 +282,22 @@ class PassiveReasoner:
                 tool_calls=[
                     {
                         "name": "customer_profile",
-                        "args": {"customer_id": state_snapshot.get("active_customer_id")},
+                        "args": {"customer_id": state_snapshot.get("authenticated_customer_id")},
                         "id": "profile-1",
                     }
                 ],
-                customer_id=state_snapshot.get("active_customer_id"),
             )
         if "issues" in user_message.lower():
             return ToolPlan(
                 tool_calls=[
                     {
                         "name": "read_customer_issue_history",
-                        "args": {"customer_id": state_snapshot.get("active_customer_id")},
+                        "args": {"customer_id": state_snapshot.get("authenticated_customer_id")},
                         "id": "issue-history-1",
                     }
                 ],
-                customer_id=state_snapshot.get("active_customer_id"),
             )
-        return ToolPlan(customer_id=state_snapshot.get("active_customer_id"))
+        return ToolPlan()
 
     def respond(self, context: ResponseContext) -> str:
         if context.verification_decision.get("decision") == "ask_user":
@@ -330,12 +327,11 @@ class SequentialAmbiguousComplaintReasoner:
                     {
                         "name": "customer_profile",
                         "args": {
-                            "customer_id": state_snapshot.get("active_customer_id"),
+                            "customer_id": state_snapshot.get("authenticated_customer_id"),
                         },
                         "id": "profile-1",
                     }
                 ],
-                customer_id=state_snapshot.get("active_customer_id"),
             )
         if self.plan_calls == 3:
             return ToolPlan(
@@ -343,17 +339,16 @@ class SequentialAmbiguousComplaintReasoner:
                     {
                         "name": "read_customer_issue_history",
                         "args": {
-                            "customer_id": state_snapshot.get("active_customer_id"),
+                            "customer_id": state_snapshot.get("authenticated_customer_id"),
                         },
                         "id": "issue-history-1",
                     }
                 ],
-                customer_id=state_snapshot.get("active_customer_id"),
             )
         action = {
             "name": "propose_log_complaint",
             "args": {
-                "customer_id": state_snapshot.get("active_customer_id"),
+                "customer_id": state_snapshot.get("authenticated_customer_id"),
                 "issue": "late again",
             },
             "id": "complaint-1",
@@ -361,8 +356,6 @@ class SequentialAmbiguousComplaintReasoner:
         return ToolPlan(
             tool_calls=[action],
             requested_actions=[action],
-            customer_id=state_snapshot.get("active_customer_id"),
-            issue="late again",
         )
 
     def respond(self, context: ResponseContext) -> str:
@@ -372,9 +365,13 @@ class SequentialAmbiguousComplaintReasoner:
 
 
 class ActiveOrderCancelReasoner:
+    def __init__(self) -> None:
+        self.last_order_id: int | None = None
+
     def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
         normalized = user_message.lower()
         if "check order" in normalized:
+            self.last_order_id = 2468
             return ToolPlan(
                 tool_calls=[
                     {"name": "order_lookup", "args": {"order_id": 2468}, "id": "lookup-1"}
@@ -386,7 +383,7 @@ class ActiveOrderCancelReasoner:
         ):
             action = {
                 "name": "propose_cancel_order",
-                "args": {"order_id": state_snapshot.get("active_order_id")},
+                "args": {"order_id": self.last_order_id},
                 "id": "cancel-1",
             }
             return ToolPlan(
@@ -394,7 +391,7 @@ class ActiveOrderCancelReasoner:
                     {
                         "name": "order_lookup",
                         "args": {
-                            "order_id": state_snapshot.get("active_order_id"),
+                            "order_id": self.last_order_id,
                         },
                         "id": "lookup-2",
                     },
@@ -405,14 +402,14 @@ class ActiveOrderCancelReasoner:
         if "cancel" in normalized:
             action = {
                 "name": "propose_cancel_order",
-                "args": {"order_id": state_snapshot.get("active_order_id")},
+                "args": {"order_id": self.last_order_id},
                 "id": "cancel-1",
             }
             return ToolPlan(
                 tool_calls=[action],
                 requested_actions=[action],
             )
-        return ToolPlan(customer_id=state_snapshot.get("active_customer_id"))
+        return ToolPlan()
 
     def respond(self, context: ResponseContext) -> str:
         if context.verification_decision.get("decision") == "ask_user":
@@ -430,7 +427,7 @@ class ComplaintThenProfileReasoner:
             action = {
                 "name": "propose_log_complaint",
                 "args": {
-                    "customer_id": state_snapshot.get("active_customer_id"),
+                    "customer_id": state_snapshot.get("authenticated_customer_id"),
                     "order_id": 7890,
                     "issue": "package damaged",
                 },
@@ -439,18 +436,15 @@ class ComplaintThenProfileReasoner:
             return ToolPlan(
                 tool_calls=[action],
                 requested_actions=[action],
-                customer_id=state_snapshot.get("active_customer_id"),
-                issue="package damaged",
             )
         return ToolPlan(
             tool_calls=[
                 {
                     "name": "customer_profile",
-                    "args": {"customer_id": state_snapshot.get("active_customer_id")},
+                    "args": {"customer_id": state_snapshot.get("authenticated_customer_id")},
                     "id": "profile-1",
                 }
             ],
-            customer_id=state_snapshot.get("active_customer_id"),
         )
 
     def respond(self, context: ResponseContext) -> str:
@@ -527,7 +521,7 @@ class ExplicitMemoryWriteReasoner:
         action = {
             "name": "propose_write_memory",
             "args": {
-                "customer_id": state_snapshot.get("active_customer_id"),
+                "customer_id": state_snapshot.get("authenticated_customer_id"),
                 "key": "refund_preference",
                 "value": "prefers refunds",
                 "memory_type": "preference",
@@ -537,40 +531,30 @@ class ExplicitMemoryWriteReasoner:
         return ToolPlan(
             tool_calls=[action],
             requested_actions=[action],
-            customer_id=state_snapshot.get("active_customer_id"),
-            memory_candidate=MemoryWriteCandidate(
-                should_write=True,
-                memory_type="preference",
-                key="refund_preference",
-                value="prefers refunds",
-                reason_code="DURABLE_PREFERENCE",
-            ),
         )
 
     def respond(self, context: ResponseContext) -> str:
         return "LLM guessed memory response"
 
 
-class MemoryCandidateReasoner:
-    def __init__(self, memory_type: str, reason_code: str) -> None:
+class MemoryTypeActionReasoner:
+    def __init__(self, memory_type: str) -> None:
         self.memory_type = memory_type
-        self.reason_code = reason_code
 
     def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
         action = {
             "name": "propose_write_memory",
-            "args": {"customer_id": state_snapshot.get("active_customer_id")},
+            "args": {
+                "customer_id": state_snapshot.get("authenticated_customer_id"),
+                "key": "customer_note",
+                "value": "not durable preference",
+                "memory_type": self.memory_type,
+            },
             "id": "memory-1",
         }
         return ToolPlan(
             tool_calls=[action],
             requested_actions=[action],
-            customer_id=state_snapshot.get("active_customer_id"),
-            memory_candidate=MemoryWriteCandidate(
-                should_write=False,
-                memory_type=self.memory_type,
-                reason_code=self.reason_code,
-            ),
         )
 
     def respond(self, context: ResponseContext) -> str:
@@ -587,7 +571,7 @@ class WarmClarificationReasoner:
         action = {
             "name": "propose_log_complaint",
             "args": {
-                "customer_id": state_snapshot.get("active_customer_id"),
+                "customer_id": state_snapshot.get("authenticated_customer_id"),
                 "order_id": 2222,
             },
             "id": "complaint-1",
@@ -595,7 +579,6 @@ class WarmClarificationReasoner:
         return ToolPlan(
             tool_calls=[action],
             requested_actions=[action],
-            customer_id=state_snapshot.get("active_customer_id"),
         )
 
     def respond(self, context: ResponseContext) -> str:
@@ -628,7 +611,7 @@ class ActionRequestReasoner:
             and (state_snapshot.get("planner_feedback") or {}).get("code") == "ORDER_LOOKUP_REQUIRED_BEFORE_MUTATION"
             and not order
         ):
-            action_calls = self._tool_calls(state_snapshot.get("active_customer_id"))
+            action_calls = self._tool_calls(state_snapshot.get("authenticated_customer_id"))
             lookup = {
                 "name": "order_lookup",
                 "args": {"order_id": self.order_id} if self.order_id is not None else {},
@@ -637,14 +620,10 @@ class ActionRequestReasoner:
             return ToolPlan(
                 tool_calls=[lookup, *action_calls],
                 requested_actions=action_calls,
-                customer_id=state_snapshot.get("active_customer_id"),
-                issue=self.issue,
             )
 
-        tool_calls = self._tool_calls(state_snapshot.get("active_customer_id"))
+        tool_calls = self._tool_calls(state_snapshot.get("authenticated_customer_id"))
         return ToolPlan(
-            customer_id=state_snapshot.get("active_customer_id"),
-            issue=self.issue,
             tool_calls=tool_calls,
             requested_actions=tool_calls,
         )
@@ -706,18 +685,72 @@ class DirectMutationReasoner:
 
     def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
         args = dict(self.args)
-        if "customer_id" not in args and state_snapshot.get("active_customer_id") is not None:
-            args["customer_id"] = state_snapshot["active_customer_id"]
         action = {"name": self.action_name, "args": args, "id": f"{self.action_name}-1"}
         return ToolPlan(
             tool_calls=[action],
             requested_actions=[action],
-            customer_id=args.get("customer_id"),
-            issue=args.get("issue"),
         )
 
     def respond(self, context: ResponseContext) -> str:
         return "LLM guessed mutation response"
+
+
+class CrossCustomerReadReasoner:
+    def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
+        return ToolPlan(
+            tool_calls=[
+                {
+                    "name": "customer_profile",
+                    "args": {"customer_id": 2},
+                    "id": "profile-1",
+                },
+                {
+                    "name": "read_customer_memory",
+                    "args": {"customer_id": 2},
+                    "id": "memory-1",
+                },
+            ],
+        )
+
+    def respond(self, context: ResponseContext) -> str:
+        return str(context.verified_facts)
+
+
+class ListOrdersReasoner:
+    def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
+        return ToolPlan(
+            tool_calls=[
+                {
+                    "name": "list_my_orders",
+                    "args": {},
+                    "id": "orders-1",
+                }
+            ],
+        )
+
+    def respond(self, context: ResponseContext) -> str:
+        return str(context.verified_facts.get("orders", []))
+
+
+class TurnHistoryReasoner:
+    def __init__(self) -> None:
+        self.plan_snapshots: list[dict[str, Any]] = []
+
+    def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
+        self.plan_snapshots.append(state_snapshot)
+        if "7890" in user_message:
+            return ToolPlan(
+                tool_calls=[
+                    {"name": "order_lookup", "args": {"order_id": 7890}, "id": "lookup-1"}
+                ],
+            )
+        return ToolPlan()
+
+    def respond(self, context: ResponseContext) -> str:
+        order = context.verified_facts.get("order", {})
+        if order:
+            return f"Order {order['order_id']} is {order['status']}."
+        return "No current facts."
 
 
 def test_refund_uses_react_loop_before_action() -> None:
@@ -725,7 +758,7 @@ def test_refund_uses_react_loop_before_action() -> None:
     reasoner = RefundAfterObservationReasoner()
     agent = CustomerServiceAgent(reasoner, repository)
 
-    response, updates = agent.trace("react-refund", "Refund order 7890 if delivered")
+    response, updates = agent.trace("react-refund", "Refund order 7890 if delivered", customer_id=7)
 
     planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
     assert len(planner_updates) == 1
@@ -733,8 +766,6 @@ def test_refund_uses_react_loop_before_action() -> None:
     assert [action["name"] for action in planner_updates[0]["requested_actions"]] == [
         "propose_refund"
     ]
-    assert planner_updates[0]["active_order_id"] == 7890
-
     assert reasoner.plan_snapshots[0]["tool_results"] == {}
 
     verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
@@ -758,7 +789,11 @@ def test_planner_action_calls_are_verifier_gated() -> None:
     reasoner = CombinedThenActionReasoner()
     agent = CustomerServiceAgent(reasoner, repository)
 
-    response, updates = agent.trace("react-combined", "Refund order 7890 if delivered")
+    response, updates = agent.trace(
+        "react-combined",
+        "Refund order 7890 if delivered",
+        customer_id=7,
+    )
 
     planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
     verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
@@ -806,7 +841,7 @@ def test_lookup_only_planner_does_not_fabricate_refund_action() -> None:
     reasoner = LookupOnlyReasoner()
     agent = CustomerServiceAgent(reasoner, repository)
 
-    response, updates = agent.trace("react-limit", "Refund order 7890 if delivered")
+    response, updates = agent.trace("react-limit", "Refund order 7890 if delivered", customer_id=7)
 
     verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
 
@@ -818,7 +853,7 @@ def test_lookup_only_planner_does_not_fabricate_refund_action() -> None:
     assert repository.get_order(7890)["status"] == "delivered"
 
 
-def test_read_then_stop_preserves_active_order_without_action() -> None:
+def test_read_then_stop_returns_verified_order_without_action() -> None:
     repository = build_repository()
     reasoner = ReadThenStopReasoner()
     agent = CustomerServiceAgent(reasoner, repository)
@@ -827,7 +862,7 @@ def test_read_then_stop_preserves_active_order_without_action() -> None:
 
     planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
     assert reasoner.plan_calls == 1
-    assert planner_updates[-1]["active_order_id"] == 7890
+    assert planner_updates[-1]["tool_calls"][0]["args"] == {"order_id": 7890}
     assert response.order_id == 7890
     assert response.response == "7890"
 
@@ -867,16 +902,13 @@ def test_refund_owned_delivered_order_routes_success_through_responder() -> None
     assert repository.get_order(5678)["status"] == "refund_requested"
 
 
-def test_explicit_memory_write_candidate_routes_success_through_responder() -> None:
+def test_explicit_memory_write_action_routes_success_through_responder() -> None:
     repository = build_repository()
     agent = CustomerServiceAgent(ExplicitMemoryWriteReasoner(), repository)
 
     response, updates = agent.trace("memory-write", "Remember I prefer refunds", customer_id=7)
 
-    planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
     verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
-    assert planner_updates[0]["memory_candidate"]["memory_type"] == "preference"
-    assert planner_updates[0]["memory_candidate"]["should_write"] is True
     assert [action["name"] for action in verifier_updates[-1]["requested_actions"]] == [
         "propose_write_memory"
     ]
@@ -895,7 +927,6 @@ def test_no_tool_memory_write_is_not_inferred_from_message_text() -> None:
 
     planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
     assert planner_updates[0]["requested_actions"] == []
-    assert planner_updates[0]["memory_candidate"]["should_write"] is False
     assert "memory_write" not in response.tool_results
     assert len(repository.read_memories(7, key="refund_preference")) == 0
 
@@ -1054,14 +1085,13 @@ def test_ambiguous_order_asks_before_complaint() -> None:
     response, updates = agent.trace("ambiguous-order", "My order is late again", customer_id=7)
 
     planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
-    assert planner_updates[-1]["active_order_id"] == 7890
     assert planner_updates[-1]["requested_actions"][0]["args"].get("order_id") is None
     assert response.verification_decision["decision"] == "ask_user"
     assert "complaint" not in response.tool_results
     assert "order_id" in response.verification_decision.get("missing_slots", [])
 
 
-def test_active_order_action_runs_lookup_before_cancel() -> None:
+def test_context_order_action_runs_lookup_before_cancel() -> None:
     repository = build_repository()
     agent = CustomerServiceAgent(ActiveOrderCancelReasoner(), repository)
 
@@ -1069,7 +1099,6 @@ def test_active_order_action_runs_lookup_before_cancel() -> None:
     response, updates = agent.trace("active-order-cancel", "Cancel it", customer_id=7)
 
     planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
-    assert planner_updates[0]["active_order_id"] == 2468
     assert [call["name"] for call in planner_updates[1]["tool_calls"]] == ["order_lookup"]
     assert response.verification_decision["decision"] == "proceed_to_action"
     assert response.tool_results["cancelled_order"]["order_id"] == 2468
@@ -1078,9 +1107,8 @@ def test_active_order_action_runs_lookup_before_cancel() -> None:
 def test_temporary_issue_is_not_written_to_long_term_memory() -> None:
     repository = build_repository()
     agent = CustomerServiceAgent(
-        MemoryCandidateReasoner(
+        MemoryTypeActionReasoner(
             "temporary_issue",
-            "Planner classified this as a temporary order issue.",
         ),
         repository,
     )
@@ -1091,19 +1119,17 @@ def test_temporary_issue_is_not_written_to_long_term_memory() -> None:
         customer_id=7,
     )
 
-    planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
-    assert planner_updates[-1]["memory_candidate"]["memory_type"] == "temporary_issue"
     assert "memory_write" not in response.tool_results
     assert response.verification_decision["decision"] == "ask_user"
+    assert response.verification_decision.get("missing_slots", []) == ["long_term_write_allowed"]
     assert not repository.read_memories(7, key="customer_note")
 
 
 def test_transaction_request_is_not_written_to_long_term_memory() -> None:
     repository = build_repository()
     agent = CustomerServiceAgent(
-        MemoryCandidateReasoner(
+        MemoryTypeActionReasoner(
             "transaction_request",
-            "Planner classified this as a transaction request.",
         ),
         repository,
     )
@@ -1114,8 +1140,6 @@ def test_transaction_request_is_not_written_to_long_term_memory() -> None:
         customer_id=7,
     )
 
-    planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
-    assert planner_updates[-1]["memory_candidate"]["memory_type"] == "transaction_request"
     assert "memory_write" not in response.tool_results
     assert response.verification_decision["decision"] == "ask_user"
     assert response.verification_decision.get("missing_slots", []) == ["long_term_write_allowed"]
@@ -1195,6 +1219,108 @@ def test_memory_read_does_not_include_stale_order_result() -> None:
     assert second_response.response == "customer_memories"
 
 
+def test_customer_scoped_reads_ignore_planner_customer_id() -> None:
+    repository = build_repository()
+    agent = CustomerServiceAgent(CrossCustomerReadReasoner(), repository)
+
+    response, updates = agent.trace(
+        "cross-customer-profile",
+        "Show customer id 2",
+        customer_id=7,
+    )
+
+    assert response.customer_id == 7
+    assert response.tool_results["customer"]["customer_id"] == 7
+    assert response.tool_results["customer"]["name"] == "Dana Lee"
+    assert response.verified_facts["customer"]["customer_id"] == 7
+    assert "Bob Lin" not in response.response
+
+
+def test_list_my_orders_only_returns_authenticated_customer_orders() -> None:
+    repository = build_repository()
+    agent = CustomerServiceAgent(ListOrdersReasoner(), repository)
+
+    response, updates = agent.trace(
+        "list-my-orders",
+        "Show customer id 2 orders",
+        customer_id=7,
+    )
+
+    planner_updates = [update["state"] for update in updates if update["node"] == "planner"]
+    assert planner_updates[-1]["tool_calls"] == [
+        {"name": "list_my_orders", "args": {}, "id": "orders-1"}
+    ]
+    assert [order["order_id"] for order in response.tool_results["orders"]] == [
+        2468,
+        7890,
+        2222,
+    ]
+    assert response.verified_facts["orders"] == [
+        {
+            "order_id": 2468,
+            "product_name": "Monitor Arm",
+            "status": "processing",
+            "order_date": "2026-04-21T09:00:00",
+            "delivery_date": None,
+        },
+        {
+            "order_id": 7890,
+            "product_name": "Standing Desk",
+            "status": "delivered",
+            "order_date": "2026-04-20T09:00:00",
+            "delivery_date": "2026-04-24T15:00:00",
+        },
+        {
+            "order_id": 2222,
+            "product_name": "Desk Lamp",
+            "status": "delivered",
+            "order_date": "2026-04-18T09:00:00",
+            "delivery_date": "2026-04-20T12:00:00",
+        },
+    ]
+    assert "5678" not in response.response
+    assert "Gaming Keyboard" not in response.response
+
+
+def test_turn_history_carries_previous_decision_facts_response_and_message() -> None:
+    repository = build_repository()
+    reasoner = TurnHistoryReasoner()
+    agent = CustomerServiceAgent(reasoner, repository)
+
+    first_response, _ = agent.trace(
+        "turn-history",
+        "Check order 7890",
+        customer_id=7,
+    )
+    second_response, _ = agent.trace(
+        "turn-history",
+        "Cancel it",
+        customer_id=7,
+    )
+
+    assert first_response.verified_facts["order"]["order_id"] == 7890
+    assert reasoner.plan_snapshots[0]["recent_turns"] == []
+    assert reasoner.plan_snapshots[1]["tool_results"] == {}
+    assert reasoner.plan_snapshots[1]["recent_turns"] == [
+        {
+            "user_message": "Check order 7890",
+            "assistant_response": "Order 7890 is delivered.",
+            "verification_decision": {"decision": "proceed_to_response"},
+            "verified_facts": {
+                "order": {
+                    "order_id": 7890,
+                    "customer_id": 7,
+                    "product_name": "Standing Desk",
+                    "status": "delivered",
+                    "order_date": "2026-04-20T09:00:00",
+                    "delivery_date": "2026-04-24T15:00:00",
+                }
+            },
+        }
+    ]
+    assert second_response.response == "No current facts."
+
+
 def test_customer_cannot_refund_another_customers_order() -> None:
     repository = build_repository()
     reasoner = RefundAfterObservationReasoner()
@@ -1205,14 +1331,16 @@ def test_customer_cannot_refund_another_customers_order() -> None:
     verifier_updates = [update["state"] for update in updates if update["node"] == "verifier"]
     assert verifier_updates[-1]["verifier_decision"] == "block"
     assert response.verification_decision["decision"] == "block"
+    assert response.tool_results["order_lookup"] == {"order_id": 7890, "found": False}
+    assert "order" not in response.tool_results
     assert response.verification_decision.get("policy_errors", []) == [
         {
-            "error_code": "ORDER_CUSTOMER_MISMATCH",
+            "error_code": "ORDER_NOT_FOUND",
             "blocked_action": "propose_refund",
             "order_id": 7890,
-            "customer_id": 8,
+            "customer_id": None,
             "current_status": None,
-            "reason_code": "ORDER_CUSTOMER_MISMATCH",
+            "reason_code": "ORDER_NOT_FOUND",
         }
     ]
     assert "refund" not in response.tool_results
@@ -1231,8 +1359,6 @@ def test_stale_complaint_issue_does_not_reach_later_unrelated_request() -> None:
     )
     profile_response, profile_updates = agent.trace("issue-pollution", "Show my profile", customer_id=7)
 
-    planner_updates = [update["state"] for update in profile_updates if update["node"] == "planner"]
     assert complaint_response.tool_results["complaint"]["issue"] == "package damaged"
-    assert reasoner.plan_snapshots[-1]["issue"] is None
-    assert planner_updates[-1]["issue"] is None
+    assert "issue" not in reasoner.plan_snapshots[-1]
     assert "package damaged" not in profile_response.response

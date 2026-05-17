@@ -9,7 +9,6 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
 from customer_service_agent.config import Settings
-from customer_service_agent.models import MemoryWriteCandidate
 from customer_service_agent.graph.tools import (
     PLANNER_TOOLS,
 )
@@ -21,8 +20,7 @@ class ResponseContext:
     user_message: str
     verification_decision: dict[str, Any]
     long_term_memory: list[dict[str, Any]]
-    active_customer_id: int | None
-    active_order_id: int | None
+    authenticated_customer_id: int | None
     verified_facts: dict[str, Any] = field(default_factory=dict)
 
 
@@ -31,10 +29,6 @@ class ToolPlan:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     requested_actions: list[dict[str, Any]] = field(default_factory=list)
     continue_after_read: bool = False
-    customer_id: int | None = None
-    order_id: int | None = None
-    issue: str | None = None
-    memory_candidate: MemoryWriteCandidate = field(default_factory=MemoryWriteCandidate)
 
 
 class Reasoner:
@@ -49,9 +43,8 @@ class StructuredChatReasoner(Reasoner):
     def plan(self, user_message: str, state_snapshot: dict[str, Any]) -> ToolPlan:
         state_prompt = json.dumps(
             {
-                "active_customer_id": state_snapshot.get("active_customer_id"),
-                "active_order_id": state_snapshot.get("active_order_id"),
-                "known_issue": state_snapshot.get("issue"),
+                "authenticated_customer_id": state_snapshot.get("authenticated_customer_id"),
+                "recent_turns": state_snapshot.get("recent_turns", []),
                 "observations": state_snapshot.get("tool_results", {}),
                 "planner_feedback": state_snapshot.get("planner_feedback", {}),
                 "react_iterations": state_snapshot.get("react_iterations"),
@@ -72,8 +65,7 @@ class StructuredChatReasoner(Reasoner):
             "verified_facts": context.verified_facts,
             "verification_decision": context.verification_decision,
             "long_term_memory": context.long_term_memory[:5],
-            "active_customer_id": context.active_customer_id,
-            "active_order_id": context.active_order_id,
+            "authenticated_customer_id": context.authenticated_customer_id,
             "user_message": context.user_message,
         }
         response = self._model.invoke(

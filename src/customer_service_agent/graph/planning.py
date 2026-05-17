@@ -3,168 +3,69 @@ from __future__ import annotations
 from typing import Any
 
 from customer_service_agent.graph.tools import ACTION_TOOL_NAMES
-from customer_service_agent.models import (
-    MEMORY_TYPES,
-    WRITABLE_MEMORY_TYPES,
-    MemoryWriteCandidate,
-)
 from customer_service_agent.reasoning import ToolPlan
 
 
-def prepare_plan(
-    plan,
-    state_snapshot: dict[str, Any],
-):
+def split_tool_calls(plan):
     if plan is None:
-        plan = empty_tool_plan()
+        return ToolPlan()
 
-    plan.customer_id = first_not_none(
-        plan.customer_id,
-        first_int_arg(plan.tool_calls, "customer_id"),
-        first_int_arg(plan.requested_actions, "customer_id"),
-        state_snapshot.get("active_customer_id"),
+    action_calls: list[dict[str, Any]] = []
+    read_calls: list[dict[str, Any]] = []
+    seen_actions: set[tuple[str, str | None, tuple[tuple[str, str], ...]]] = set()
+    explicit_continue_after_read: list[bool] = []
+
+    for action in plan.requested_actions:
+        add_action(action_calls, seen_actions, action)
+
+    for call in plan.tool_calls:
+        if call.get("name") in ACTION_TOOL_NAMES:
+            add_action(action_calls, seen_actions, call)
+            continue
+
+        args = call.setdefault("args", {})
+        flag = bool_or_none(args.pop("continue_after_read", None))
+        if flag is not None:
+            explicit_continue_after_read.append(flag)
+        read_calls.append(call)
+
+    plan.tool_calls = read_calls
+    plan.requested_actions = action_calls
+    plan.continue_after_read = continue_after_read(
+        plan.continue_after_read,
+        explicit_continue_after_read,
     )
-    plan.order_id = first_not_none(
-        plan.order_id,
-        first_int_arg(plan.tool_calls, "order_id"),
-        first_int_arg(plan.requested_actions, "order_id"),
-    )
-
-    plan.issue = plan.issue or first_str_arg(plan.requested_actions, "issue") or first_str_arg(
-        plan.tool_calls, "issue"
-    )
-    plan.memory_candidate = normalize_memory_candidate(plan)
-    plan.continue_after_read = infer_continue_after_read(plan)
-
-    plan.requested_actions = normalize_requested_actions(plan)
-    plan.tool_calls = normalize_read_tools(plan)
-
     return plan
 
 
-def empty_tool_plan() -> ToolPlan:
-    return ToolPlan()
+def add_action(
+    action_calls: list[dict[str, Any]],
+    seen_actions: set[tuple[str, str | None, tuple[tuple[str, str], ...]]],
+    action: dict[str, Any],
+) -> None:
+    args = dict(action.get("args") or {})
+    normalized_action = {
+        "name": str(action.get("name") or ""),
+        "args": args,
+        "id": action.get("id"),
+    }
+    signature = (
+        normalized_action["name"],
+        normalized_action["id"],
+        tuple(sorted((str(key), str(value)) for key, value in args.items())),
+    )
+    if signature in seen_actions:
+        return
+    seen_actions.add(signature)
+    action_calls.append(normalized_action)
 
 
-def normalize_requested_actions(
-    plan: ToolPlan,
-) -> list[dict[str, Any]]:
-    raw_actions = [
-        *plan.requested_actions,
-        *[call for call in plan.tool_calls if call.get("name") in ACTION_TOOL_NAMES],
-    ]
-    actions_by_name = {str(action.get("name")): dict(action) for action in raw_actions}
-
-    normalized: list[dict[str, Any]] = []
-    for action in actions_by_name.values():
-        name = str(action.get("name") or "")
-        args = dict(action.get("args") or {})
-        if name in {"propose_refund", "propose_cancel_order", "propose_log_complaint"}:
-            if args.get("order_id") is None and plan.order_id is not None:
-                args["order_id"] = plan.order_id
-        if name == "propose_log_complaint":
-            if args.get("customer_id") is None and plan.customer_id is not None:
-                args["customer_id"] = plan.customer_id
-            if not args.get("issue") and plan.issue:
-                args["issue"] = plan.issue
-        if name == "propose_write_memory":
-            if args.get("customer_id") is None and plan.customer_id is not None:
-                args["customer_id"] = plan.customer_id
-            if not args.get("key") and plan.memory_candidate.key:
-                args["key"] = plan.memory_candidate.key
-            if not args.get("value") and plan.memory_candidate.value:
-                args["value"] = plan.memory_candidate.value
-        normalized.append({"name": name, "args": args, "id": action.get("id")})
-    return normalized
-
-
-def normalize_read_tools(plan: ToolPlan) -> list[dict[str, Any]]:
-    read_tools = [
-        call for call in plan.tool_calls if call.get("name") not in ACTION_TOOL_NAMES
-    ]
-    for call in read_tools:
-        args = call.setdefault("args", {})
-        args.pop("continue_after_read", None)
-        if (
-            call.get("name") == "order_lookup"
-            and args.get("order_id") is None
-            and plan.order_id is not None
-        ):
-            args["order_id"] = plan.order_id
-    return read_tools
-
-
-def infer_continue_after_read(plan: ToolPlan) -> bool:
-    values = [
-        value
-        for value in (
-            bool_or_none((call.get("args") or {}).get("continue_after_read"))
-            for call in plan.tool_calls
-            if call.get("name") not in ACTION_TOOL_NAMES
-        )
-        if value is not None
-    ]
-    if True in values:
+def continue_after_read(default: bool, explicit_flags: list[bool]) -> bool:
+    if True in explicit_flags:
         return True
-    if False in values:
+    if False in explicit_flags:
         return False
-    return plan.continue_after_read
-
-
-def normalize_memory_candidate(plan: ToolPlan) -> MemoryWriteCandidate:
-    candidate = plan.memory_candidate
-    memory_type = (
-        candidate.memory_type
-        if candidate.memory_type != "unclear"
-        else first_str_arg(plan.requested_actions, "memory_type")
-        or first_str_arg(plan.tool_calls, "memory_type")
-        or "unclear"
-    )
-    if memory_type not in MEMORY_TYPES:
-        memory_type = "unclear"
-    key = (
-        candidate.key
-        or first_str_arg(plan.requested_actions, "key")
-        or first_str_arg(plan.tool_calls, "key")
-    )
-    value = (
-        candidate.value
-        or first_str_arg(plan.requested_actions, "value")
-        or first_str_arg(plan.tool_calls, "value")
-    )
-    return MemoryWriteCandidate(
-        should_write=(
-            candidate.should_write or memory_type in WRITABLE_MEMORY_TYPES and bool(key and value)
-        ),
-        memory_type=memory_type,
-        key=key,
-        value=value,
-        reason_code=candidate.reason_code,
-    )
-
-
-def first_int_arg(calls: list[dict[str, Any]], key: str) -> int | None:
-    for call in calls:
-        value = int_or_none((call.get("args") or {}).get(key))
-        if value is not None:
-            return value
-    return None
-
-
-def first_str_arg(calls: list[dict[str, Any]], key: str) -> str | None:
-    for call in calls:
-        value = (call.get("args") or {}).get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
-
-
-def int_or_none(value: Any) -> int | None:
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.isdigit():
-        return int(value)
-    return None
+    return default
 
 
 def bool_or_none(value: Any) -> bool | None:
@@ -176,11 +77,4 @@ def bool_or_none(value: Any) -> bool | None:
             return True
         if normalized == "false":
             return False
-    return None
-
-
-def first_not_none(*values):
-    for value in values:
-        if value is not None:
-            return value
     return None

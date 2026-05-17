@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypedDict
 
-from langgraph.graph import MessagesState
 from pydantic import BaseModel, Field
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -93,14 +92,6 @@ class ChatResponse(BaseModel):
     verification_decision: dict[str, Any] = Field(default_factory=dict)
 
 
-class MemoryWriteCandidate(BaseModel):
-    should_write: bool = False
-    memory_type: MemoryType = "unclear"
-    key: str | None = None
-    value: str | None = None
-    reason_code: str | None = None
-
-
 class VerifierOutput(BaseModel):
     decision: Literal[
         "proceed_to_action",
@@ -118,11 +109,10 @@ class VerifierOutput(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)
 
 
-class AgentState(MessagesState):
-    active_customer_id: int | None
-    active_order_id: int | None
-    issue: str | None
-    memory_candidate: dict[str, Any]
+class AgentState(TypedDict, total=False):
+    messages: list[Any]
+    authenticated_customer_id: int | None
+    turn_history: list[dict[str, Any]]
     tool_calls: list[dict[str, Any]]
     requested_actions: list[dict[str, Any]]
     continue_after_read: bool
@@ -130,7 +120,6 @@ class AgentState(MessagesState):
     verification_decision: dict[str, Any]
     verified_facts: dict[str, Any]
     react_iterations: int
-    max_react_iterations: int
     long_term_memory: list[dict[str, Any]]
     final_response: str | None
 

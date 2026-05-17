@@ -65,12 +65,27 @@ def test_get_order_and_customer() -> None:
     repository = build_repository()
 
     order = repository.get_order(12345)
+    scoped_order = repository.get_order_for_customer(12345, customer_id=1)
+    cross_account_order = repository.get_order_for_customer(5678, customer_id=1)
     customer = repository.get_customer(1)
 
     assert order is not None
     assert order["status"] == "in_transit"
+    assert scoped_order is not None
+    assert scoped_order["order_id"] == 12345
+    assert cross_account_order is None
     assert customer is not None
     assert customer["email"] == "alice@example.com"
+
+
+def test_list_orders_for_customer_scopes_results() -> None:
+    repository = build_repository()
+
+    alice_orders = repository.list_orders_for_customer(1)
+    bob_orders = repository.list_orders_for_customer(2)
+
+    assert [order["order_id"] for order in alice_orders] == [12345]
+    assert [order["order_id"] for order in bob_orders] == [5678]
 
 
 def test_request_refund_updates_status() -> None:

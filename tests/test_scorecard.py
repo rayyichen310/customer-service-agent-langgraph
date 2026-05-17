@@ -33,14 +33,13 @@ def test_scorecard_assertions_fail_bad_refund_record() -> None:
     assert run_scorecard.scorecard_exit_code([record]) == 1
 
 
-def test_scorecard_planner_iterations_include_active_order_without_slots() -> None:
+def test_scorecard_planner_iterations_include_requested_order() -> None:
     node_trace = [
         {
             "node": "planner",
             "state": {
-                "tool_calls": [],
+                "tool_calls": [{"name": "order_lookup", "args": {"order_id": 2222}}],
                 "requested_actions": [],
-                "active_order_id": 2222,
             },
         }
     ]
@@ -48,7 +47,7 @@ def test_scorecard_planner_iterations_include_active_order_without_slots() -> No
     assert run_scorecard.planner_iterations(node_trace) == [
         {
             "iteration": 1,
-            "tool_calls": [],
+            "tool_calls": ["order_lookup"],
             "requested_actions": [],
             "order_id": 2222,
         }

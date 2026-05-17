@@ -61,6 +61,27 @@ class CustomerServiceRepository:
                 return None
             return _order_to_dict(order)
 
+    def get_order_for_customer(self, order_id: int, customer_id: int) -> dict[str, Any] | None:
+        with self._session_factory() as session:
+            stmt = select(Order).where(
+                Order.order_id == order_id,
+                Order.customer_id == customer_id,
+            )
+            order = session.scalars(stmt).first()
+            if not order:
+                return None
+            return _order_to_dict(order)
+
+    def list_orders_for_customer(self, customer_id: int) -> list[dict[str, Any]]:
+        with self._session_factory() as session:
+            stmt = (
+                select(Order)
+                .where(Order.customer_id == customer_id)
+                .order_by(Order.order_date.desc(), Order.order_id.desc())
+            )
+            orders = session.scalars(stmt).all()
+            return [_order_to_dict(order) for order in orders]
+
     def get_customer(self, customer_id: int) -> dict[str, Any] | None:
         with self._session_factory() as session:
             customer = session.get(Customer, customer_id)

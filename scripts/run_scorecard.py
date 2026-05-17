@@ -226,6 +226,11 @@ def planner_iterations(node_trace: list[dict[str, Any]]) -> list[dict[str, Any]]
         start=1,
     ):
         state = item.get("state", {})
+        order_id = None
+        for call in [*state.get("tool_calls", []), *state.get("requested_actions", [])]:
+            order_id = _int_or_none(call.get("args", {}).get("order_id"))
+            if order_id is not None:
+                break
         iterations.append(
             {
                 "iteration": index,
@@ -237,7 +242,7 @@ def planner_iterations(node_trace: list[dict[str, Any]]) -> list[dict[str, Any]]
                     action.get("name", "")
                     for action in state.get("requested_actions", [])
                 ],
-                "order_id": state.get("active_order_id"),
+                "order_id": order_id,
             }
         )
     return iterations
@@ -452,7 +457,7 @@ def log_node_trace(quiet: bool, node_trace: list[dict[str, Any]]) -> None:
         print(f"  node: {node}", file=sys.stderr, flush=True)
         if node == "planner":
             print(
-                f"    customer={state.get('active_customer_id')} order={state.get('active_order_id')}",
+                f"    auth_customer={state.get('authenticated_customer_id')}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -462,7 +467,7 @@ def log_node_trace(quiet: bool, node_trace: list[dict[str, Any]]) -> None:
         elif node in {"read_tools", "actions"}:
             print(
                 f"    tools={state.get('tool_result_keys', [])} "
-                f"customer={state.get('active_customer_id')} order={state.get('active_order_id')}",
+                f"auth_customer={state.get('authenticated_customer_id')}",
                 file=sys.stderr,
                 flush=True,
             )

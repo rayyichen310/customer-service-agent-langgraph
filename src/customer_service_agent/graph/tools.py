@@ -20,20 +20,26 @@ def order_lookup(order_id: int, continue_after_read: bool = False) -> str:
 
 
 @tool("customer_profile")
-def customer_profile(customer_id: int, continue_after_read: bool = False) -> str:
-    """Read customer identity and contact details by customer ID."""
+def customer_profile(continue_after_read: bool = False) -> str:
+    """Read identity and contact details for the authenticated customer."""
     return "schema only"
 
 
 @tool("read_customer_memory")
-def read_customer_memory(customer_id: int, continue_after_read: bool = False) -> str:
-    """Read durable customer preferences and profile notes by customer ID."""
+def read_customer_memory(continue_after_read: bool = False) -> str:
+    """Read durable preferences and profile notes for the authenticated customer."""
     return "schema only"
 
 
 @tool("read_customer_issue_history")
-def read_customer_issue_history(customer_id: int, continue_after_read: bool = False) -> str:
-    """Read previous customer complaint records and summarized issue patterns by customer ID."""
+def read_customer_issue_history(continue_after_read: bool = False) -> str:
+    """Read complaint records and summarized issue patterns for the authenticated customer."""
+    return "schema only"
+
+
+@tool("list_my_orders")
+def list_my_orders(continue_after_read: bool = False) -> str:
+    """List orders belonging to the authenticated customer."""
     return "schema only"
 
 
@@ -51,22 +57,20 @@ def propose_cancel_order(order_id: int) -> str:
 
 @tool("propose_log_complaint")
 def propose_log_complaint(
-    customer_id: int | None = None,
     order_id: int | None = None,
     issue: str = "",
 ) -> str:
-    """Propose logging a customer complaint with known customer, order, and issue details."""
+    """Propose logging a complaint for the authenticated customer with known order and issue details."""
     return "schema only"
 
 
 @tool("propose_write_memory")
 def propose_write_memory(
-    customer_id: int | None = None,
     key: str = "",
     value: str = "",
     memory_type: MemoryType = "unclear",
 ) -> str:
-    """Propose writing durable customer memory with a key, value, and explicit memory type."""
+    """Propose writing durable memory for the authenticated customer with a key, value, and type."""
     return "schema only"
 
 
@@ -75,6 +79,7 @@ PLANNER_TOOLS = [
     customer_profile,
     read_customer_memory,
     read_customer_issue_history,
+    list_my_orders,
     propose_refund,
     propose_cancel_order,
     propose_log_complaint,

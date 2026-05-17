@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from customer_service_agent.graph.policy import prefer_explicit_int
+from customer_service_agent.graph.policy import int_or_none
 
 
 ORDER_MUTATION_ACTIONS = {
@@ -54,7 +54,7 @@ def _request_order_mutation(
 
     tool_results[result_key] = getattr(repository, repository_method)(
         order_id,
-        customer_id=state.get("active_customer_id"),
+        customer_id=state.get("authenticated_customer_id"),
     )
 
 
@@ -67,7 +67,7 @@ def _propose_log_complaint(
 ) -> None:
     customer_id = _customer_id(args, state)
     order_id = _order_id(args, state)
-    issue = args.get("issue") or state.get("issue")
+    issue = args.get("issue")
     if customer_id is not None and issue:
         tool_results["complaint"] = repository.log_complaint(
             customer_id=customer_id,
@@ -84,9 +84,8 @@ def _propose_write_memory(
     args: dict[str, Any],
 ) -> None:
     customer_id = _customer_id(args, state)
-    memory_candidate = state.get("memory_candidate") or {}
-    key = args.get("key") or memory_candidate.get("key")
-    value = args.get("value") or memory_candidate.get("value")
+    key = args.get("key")
+    value = args.get("value")
     if customer_id is not None and key and value:
         tool_results["memory_write"] = repository.write_memory(
             customer_id=customer_id,
@@ -96,8 +95,8 @@ def _propose_write_memory(
 
 
 def _customer_id(args: dict[str, Any], state: dict[str, Any]) -> int | None:
-    return prefer_explicit_int(args.get("customer_id"), state.get("active_customer_id"))
+    return state.get("authenticated_customer_id")
 
 
 def _order_id(args: dict[str, Any], state: dict[str, Any]) -> int | None:
-    return prefer_explicit_int(args.get("order_id"), state.get("active_order_id"))
+    return int_or_none(args.get("order_id"))

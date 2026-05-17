@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from customer_service_agent.models import MemoryWriteCandidate, VerifierOutput
+from customer_service_agent.models import VerifierOutput, WRITABLE_MEMORY_TYPES
 
 
 @dataclass(frozen=True)
@@ -33,13 +33,6 @@ ORDER_MUTATION_RULES = {
 
 ORDER_ACTION_NAMES = set(ORDER_MUTATION_RULES)
 
-ACTION_SLOT_REQUIREMENTS = {
-    "order_mutation": ("customer_id", "order_id", "order_record"),
-    "propose_log_complaint": ("customer_id", "order_id", "complaint_issue"),
-    "propose_write_memory": ("customer_id", "long_term_write_allowed", "memory_key_value"),
-}
-
-CUSTOMER_PROFILE_NOT_FOUND = "CUSTOMER_PROFILE_NOT_FOUND"
 ORDER_ID_MISSING = "ORDER_ID_MISSING"
 CUSTOMER_ID_MISSING = "CUSTOMER_ID_MISSING"
 ORDER_LOOKUP_REQUIRED_BEFORE_MUTATION = "ORDER_LOOKUP_REQUIRED_BEFORE_MUTATION"
@@ -49,7 +42,6 @@ COMPLAINT_ISSUE_MISSING = "COMPLAINT_ISSUE_MISSING"
 MEMORY_WRITE_NOT_ALLOWED = "MEMORY_WRITE_NOT_ALLOWED"
 MEMORY_KEY_VALUE_MISSING = "MEMORY_KEY_VALUE_MISSING"
 ORDER_NOT_FOUND = "ORDER_NOT_FOUND"
-ORDER_CUSTOMER_MISMATCH = "ORDER_CUSTOMER_MISMATCH"
 REFUND_ALREADY_REQUESTED = "REFUND_ALREADY_REQUESTED"
 CANCELLATION_ALREADY_REQUESTED = "CANCELLATION_ALREADY_REQUESTED"
 ORDER_ALREADY_DELIVERED = "ORDER_ALREADY_DELIVERED"
@@ -62,21 +54,19 @@ def verify_policy(state: dict[str, Any], *, max_react_iterations: int) -> dict[s
     tool_results = dict(state.get("tool_results", {}))
     order = tool_results.get("order")
     action_order_id = first_action_int_arg(requested_actions, "order_id")
-    active_customer_id = state.get("active_customer_id")
+    authenticated_customer_id = state.get("authenticated_customer_id")
     order_lookup_result = tool_results.get("order_lookup")
     called_order_lookup = any(
         call.get("name") == "order_lookup" for call in state.get("tool_calls", [])
     ) or bool(order_lookup_result)
-    can_replan = int(state.get("react_iterations") or 0) < int(
-        state.get("max_react_iterations") or max_react_iterations
-    )
+    can_replan = int(state.get("react_iterations") or 0) < max_react_iterations
 
     if action_names & ORDER_ACTION_NAMES:
         return verify_order_mutation(
             requested_actions,
             order=order,
             order_id=action_order_id,
-            active_customer_id=active_customer_id,
+            authenticated_customer_id=authenticated_customer_id,
             called_order_lookup=called_order_lookup,
             can_replan=can_replan,
             tool_results=tool_results,
@@ -85,30 +75,16 @@ def verify_policy(state: dict[str, Any], *, max_react_iterations: int) -> dict[s
     if "propose_log_complaint" in action_names:
         return verify_complaint(
             requested_actions,
-            planned_issue=state.get("issue"),
             order_id=action_order_id,
-            active_customer_id=active_customer_id,
+            authenticated_customer_id=authenticated_customer_id,
             tool_results=tool_results,
         )
 
     if "propose_write_memory" in action_names:
         return verify_memory_write(
             requested_actions,
-            state=state,
+            authenticated_customer_id=authenticated_customer_id,
             tool_results=tool_results,
-        )
-
-    called_customer_profile = any(
-        call.get("name") == "customer_profile" for call in state.get("tool_calls", [])
-    )
-    if called_customer_profile and not tool_results.get("customer"):
-        return _decision(
-            "block",
-            ["customer_id"],
-            [],
-            [],
-            CUSTOMER_PROFILE_NOT_FOUND,
-            tool_results,
         )
 
     return _decision("proceed_to_response", [], [], [], None, tool_results)
@@ -119,23 +95,17 @@ def verify_order_mutation(
     *,
     order: dict[str, Any] | None,
     order_id: int | None,
-    active_customer_id: int | None,
+    authenticated_customer_id: int | None,
     called_order_lookup: bool,
     can_replan: bool,
     tool_results: dict[str, Any],
 ) -> dict[str, Any]:
     action_names = {action.get("name") for action in requested_actions}
-    missing_slots = missing_slots_for_requirements(
-        ACTION_SLOT_REQUIREMENTS["order_mutation"],
-        active_customer_id=active_customer_id,
-        order_id=order_id,
-        order=order,
-    )
 
-    if "order_id" in missing_slots:
+    if order_id is None:
         return _decision(
             "ask_user",
-            missing_slots,
+            ["order_id"],
             [],
             list(action_names),
             ORDER_ID_MISSING,
@@ -144,10 +114,10 @@ def verify_order_mutation(
             planner_feedback_code=ORDER_ID_MISSING,
         )
 
-    if active_customer_id is None:
+    if authenticated_customer_id is None:
         return _decision(
             "ask_user",
-            missing_slots,
+            ["customer_id"],
             [],
             list(action_names),
             CUSTOMER_ID_MISSING,
@@ -155,10 +125,11 @@ def verify_order_mutation(
         )
 
     if not order:
+        missing_order_details = ["order_status", "order_customer_id"]
         if called_order_lookup:
             return _decision(
                 "block",
-                missing_slots,
+                missing_order_details,
                 [],
                 list(action_names),
                 ORDER_DETAILS_MISSING_AFTER_LOOKUP,
@@ -175,7 +146,7 @@ def verify_order_mutation(
         if can_replan:
             return _decision(
                 "replan",
-                missing_slots,
+                missing_order_details,
                 [],
                 list(action_names),
                 None,
@@ -185,7 +156,7 @@ def verify_order_mutation(
             )
         return _decision(
             "ask_user",
-            missing_slots,
+            missing_order_details,
             [],
             list(action_names),
             ORDER_DETAILS_MISSING_AFTER_REPLAN_LIMIT,
@@ -194,21 +165,20 @@ def verify_order_mutation(
             context={"order_id": order_id},
         )
 
-    if order["customer_id"] != active_customer_id:
+    if order["customer_id"] != authenticated_customer_id:
         return _decision(
             "block",
-            ["order_customer_id"],
+            [],
             [],
             list(action_names),
-            None,
+            ORDER_DETAILS_MISSING_AFTER_LOOKUP,
             tool_results,
             policy_errors=[
                 policy_error(
-                    "ORDER_CUSTOMER_MISMATCH",
+                    "ORDER_NOT_FOUND",
                     blocked_action=first_action_name(action_names),
-                    order_id=order["order_id"],
-                    customer_id=active_customer_id,
-                    reason_code=ORDER_CUSTOMER_MISMATCH,
+                    order_id=order_id,
+                    reason_code=ORDER_NOT_FOUND,
                 )
             ],
         )
@@ -226,7 +196,7 @@ def verify_order_mutation(
         )
 
     safe_actions = [
-        normalize_action(action, order_id=order["order_id"], customer_id=active_customer_id)
+        verified_order_action(action, order_id=order["order_id"])
         for action in requested_actions
         if action.get("name") in ORDER_ACTION_NAMES
     ]
@@ -244,23 +214,16 @@ def verify_order_mutation(
 def verify_complaint(
     requested_actions: list[dict[str, Any]],
     *,
-    planned_issue: str | None,
     order_id: int | None,
-    active_customer_id: int | None,
+    authenticated_customer_id: int | None,
     tool_results: dict[str, Any],
 ) -> dict[str, Any]:
-    issue = first_action_arg(requested_actions, "issue") or planned_issue
-    missing_slots = missing_slots_for_requirements(
-        ACTION_SLOT_REQUIREMENTS["propose_log_complaint"],
-        active_customer_id=active_customer_id,
-        order_id=order_id,
-        issue=issue,
-    )
+    issue = first_action_arg(requested_actions, "issue")
 
-    if "order_id" in missing_slots:
+    if order_id is None:
         return _decision(
             "ask_user",
-            missing_slots,
+            ["order_id"],
             [],
             ["propose_log_complaint"],
             ORDER_ID_MISSING,
@@ -268,10 +231,10 @@ def verify_complaint(
             context={},
             planner_feedback_code=ORDER_ID_MISSING,
         )
-    if "complaint_issue" in missing_slots:
+    if not issue:
         return _decision(
             "ask_user",
-            missing_slots,
+            ["complaint_issue"],
             [],
             ["propose_log_complaint"],
             COMPLAINT_ISSUE_MISSING,
@@ -279,10 +242,10 @@ def verify_complaint(
             context={"order_id": order_id},
             planner_feedback_code=COMPLAINT_ISSUE_MISSING,
         )
-    if active_customer_id is None:
+    if authenticated_customer_id is None:
         return _decision(
             "ask_user",
-            missing_slots,
+            ["customer_id"],
             [],
             ["propose_log_complaint"],
             CUSTOMER_ID_MISSING,
@@ -292,7 +255,6 @@ def verify_complaint(
     action = {
         "name": "propose_log_complaint",
         "args": {
-            "customer_id": active_customer_id,
             "order_id": order_id,
             "issue": issue,
         },
@@ -312,22 +274,15 @@ def verify_complaint(
 def verify_memory_write(
     requested_actions: list[dict[str, Any]],
     *,
-    state: dict[str, Any],
+    authenticated_customer_id: int | None,
     tool_results: dict[str, Any],
 ) -> dict[str, Any]:
-    candidate = MemoryWriteCandidate(**(state.get("memory_candidate") or {}))
-    active_customer_id = state.get("active_customer_id")
-    key = candidate.key
-    value = candidate.value
-    missing_slots = missing_slots_for_requirements(
-        ACTION_SLOT_REQUIREMENTS["propose_write_memory"],
-        active_customer_id=active_customer_id,
-        memory_candidate=candidate,
-        memory_key=key,
-        memory_value=value,
-    )
+    key = first_action_arg(requested_actions, "key")
+    value = first_action_arg(requested_actions, "value")
+    memory_type = first_action_arg(requested_actions, "memory_type") or "unclear"
+    write_allowed = memory_type in WRITABLE_MEMORY_TYPES
 
-    if "long_term_write_allowed" in missing_slots:
+    if not write_allowed:
         return _decision(
             "ask_user",
             ["long_term_write_allowed"],
@@ -335,11 +290,11 @@ def verify_memory_write(
             ["propose_write_memory"],
             MEMORY_WRITE_NOT_ALLOWED,
             tool_results,
-            context={"memory_type": candidate.memory_type},
+            context={"memory_type": memory_type},
             planner_feedback_code=MEMORY_WRITE_NOT_ALLOWED,
         )
 
-    if "customer_id" in missing_slots:
+    if authenticated_customer_id is None:
         return _decision(
             "ask_user",
             ["customer_id"],
@@ -349,10 +304,10 @@ def verify_memory_write(
             tool_results,
         )
 
-    if "memory_key_value" in missing_slots:
+    if not key or not value:
         return _decision(
             "ask_user",
-            ["memory_candidate"],
+            ["memory_key_value"],
             [],
             ["propose_write_memory"],
             MEMORY_KEY_VALUE_MISSING,
@@ -362,7 +317,7 @@ def verify_memory_write(
 
     action = {
         "name": "propose_write_memory",
-        "args": {"customer_id": active_customer_id, "key": key, "value": value},
+        "args": {"key": key, "value": value},
         "id": "verified-propose_write_memory",
     }
     return _decision(
@@ -389,47 +344,13 @@ def verify_action_policy(action_names: set[str], order: dict[str, Any] | None) -
     return errors
 
 
-def missing_slots_for_requirements(
-    requirements: tuple[str, ...],
-    *,
-    active_customer_id: int | None = None,
-    order_id: int | None = None,
-    order: dict[str, Any] | None = None,
-    issue: str | None = None,
-    memory_candidate: MemoryWriteCandidate | None = None,
-    memory_key: str | None = None,
-    memory_value: str | None = None,
-) -> list[str]:
-    missing: list[str] = []
-    for requirement in requirements:
-        if requirement == "customer_id" and active_customer_id is None:
-            missing.append("customer_id")
-        elif requirement == "order_id" and order_id is None:
-            missing.append("order_id")
-        elif requirement == "order_record" and not order:
-            missing.extend(["order_status", "order_customer_id"])
-        elif requirement == "complaint_issue" and not issue:
-            missing.append("complaint_issue")
-        elif requirement == "long_term_write_allowed" and (
-            memory_candidate is None or not memory_candidate.should_write
-        ):
-            missing.append("long_term_write_allowed")
-        elif requirement == "memory_key_value" and (not memory_key or not memory_value):
-            missing.append("memory_key_value")
-    return dedupe(missing)
-
-
-def normalize_action(
+def verified_order_action(
     action: dict[str, Any],
     *,
     order_id: int | None,
-    customer_id: int | None,
 ) -> dict[str, Any]:
     args = dict(action.get("args") or {})
-    if action.get("name") in ORDER_ACTION_NAMES:
-        args["order_id"] = order_id
-    if action.get("name") == "propose_log_complaint":
-        args["customer_id"] = customer_id
+    args["order_id"] = order_id
     return {"name": action.get("name"), "args": args, "id": action.get("id")}
 
 
@@ -498,11 +419,6 @@ def status_reason_code(status: str) -> str:
 
 def first_action_name(action_names: set[str]) -> str | None:
     return sorted(action_names)[0] if action_names else None
-
-
-def prefer_explicit_int(value: Any, fallback: int | None) -> int | None:
-    parsed = int_or_none(value)
-    return parsed if parsed is not None else fallback
 
 
 def int_or_none(value: Any) -> int | None:

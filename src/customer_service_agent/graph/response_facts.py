@@ -25,6 +25,19 @@ def build_verified_facts(
             "delivery_date": order.get("delivery_date"),
         }
 
+    orders = tool_results.get("orders")
+    if orders:
+        verified_facts["orders"] = [
+            {
+                "order_id": order.get("order_id"),
+                "product_name": order.get("product_name"),
+                "status": order.get("status"),
+                "order_date": order.get("order_date"),
+                "delivery_date": order.get("delivery_date"),
+            }
+            for order in orders
+        ]
+
     customer = tool_results.get("customer")
     if customer:
         verified_facts["customer"] = {
