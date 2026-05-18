@@ -122,8 +122,7 @@ def build_graph(reasoner, repository, max_react_iterations: int = DEFAULT_MAX_RE
             {
                 "user_message": str(last_message),
                 "assistant_response": response,
-                "verification_decision": state.get("verification_decision", {}),
-                "verified_facts": verified_facts,
+                **_turn_reference(verified_facts),
             },
         )
         return {
@@ -212,6 +211,13 @@ def _append_turn_history(
     turn: dict[str, Any],
 ) -> list[dict[str, Any]]:
     return [*list(turn_history), turn][-MAX_TURN_HISTORY:]
+
+
+def _turn_reference(verified_facts: dict[str, Any]) -> dict[str, Any]:
+    for fact in verified_facts.values():
+        if isinstance(fact, dict) and fact.get("order_id") is not None:
+            return {"referenced_order_id": fact["order_id"]}
+    return {}
 
 
 def _reset_turn_outputs() -> dict[str, Any]:

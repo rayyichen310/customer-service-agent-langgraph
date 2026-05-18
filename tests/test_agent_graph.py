@@ -1282,7 +1282,7 @@ def test_list_my_orders_only_returns_authenticated_customer_orders() -> None:
     assert "Gaming Keyboard" not in response.response
 
 
-def test_turn_history_carries_previous_decision_facts_response_and_message() -> None:
+def test_turn_history_carries_compact_previous_turn_reference() -> None:
     repository = build_repository()
     reasoner = TurnHistoryReasoner()
     agent = CustomerServiceAgent(reasoner, repository)
@@ -1305,17 +1305,7 @@ def test_turn_history_carries_previous_decision_facts_response_and_message() -> 
         {
             "user_message": "Check order 7890",
             "assistant_response": "Order 7890 is delivered.",
-            "verification_decision": {"decision": "proceed_to_response"},
-            "verified_facts": {
-                "order": {
-                    "order_id": 7890,
-                    "customer_id": 7,
-                    "product_name": "Standing Desk",
-                    "status": "delivered",
-                    "order_date": "2026-04-20T09:00:00",
-                    "delivery_date": "2026-04-24T15:00:00",
-                }
-            },
+            "referenced_order_id": 7890,
         }
     ]
     assert second_response.response == "No current facts."
