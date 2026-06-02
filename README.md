@@ -1,9 +1,9 @@
 # Intelligent Customer Service Agent
 
 This project implements the PDF specification with a `LangGraph + ReAct + MySQL` customer service agent.
-<img width="1028" height="990" alt="image" src="https://github.com/user-attachments/assets/7080ef7b-bc98-4305-aa4e-7db669d12467" />
-
 <img width="1043" height="537" alt="image" src="https://github.com/user-attachments/assets/d3a1b751-e00a-4d05-9d44-5a9df7355167" />
+
+
 
 
 
@@ -22,6 +22,8 @@ This project implements the PDF specification with a `LangGraph + ReAct + MySQL`
 - Long-term memory through MySQL tables: `customer_memory` and `complaints`
 - FastAPI endpoint and CLI interface
 - Seed data and tests mapped to the spec's scoring checklist
+
+ <img width="1028" height="990" alt="image" src="https://github.com/user-attachments/assets/7080ef7b-bc98-4305-aa4e-7db669d12467" />
 
 ## Python Environment
 
