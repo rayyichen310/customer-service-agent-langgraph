@@ -3,6 +3,13 @@
 __pycache__/
 .pytest_cache/
 .mypy_cache/
+node_modules/
+dist/
+frontend/dist/
+frontend/node_modules/
+frontend/*.tsbuildinfo
+frontend/vite.config.d.ts
+frontend/vite.config.js
 *.pyc
 *.pyo
 *.pyd

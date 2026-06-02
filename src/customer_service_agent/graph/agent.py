@@ -284,6 +284,32 @@ class CustomerServiceAgent:
             updates,
         )
 
+    def stream_trace(
+        self,
+        thread_id: str,
+        message: str,
+        customer_id: int | None = None,
+    ):
+        state = _new_turn_state(message, customer_id)
+        config = {"configurable": {"thread_id": thread_id}}
+
+        for update in self._graph.stream(state, config=config, stream_mode="updates"):
+            for node_name, node_update in update.items():
+                yield {
+                    "event": "node",
+                    "data": {
+                        "node": node_name,
+                        "state": summarize_node_update(node_name, node_update),
+                    },
+                }
+
+        snapshot = self._graph.get_state(config)
+        result = snapshot.values if isinstance(snapshot.values, dict) else {}
+        yield {
+            "event": "final",
+            "data": _chat_response(thread_id, result).model_dump(),
+        }
+
 
 def _new_turn_state(
     message: str,
