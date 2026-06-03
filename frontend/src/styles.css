@@ -452,6 +452,14 @@ textarea:disabled {
   padding: 14px;
 }
 
+.inspector-shell {
+  display: grid;
+  gap: 12px;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+}
+
 .flow-inspector {
   display: grid;
   gap: 14px;
@@ -653,12 +661,21 @@ textarea:disabled {
   gap: 8px;
 }
 
+.inspector-tabs {
+  border-bottom: 1px solid #d7dee6;
+  flex: 0 0 auto;
+  padding-bottom: 10px;
+}
+
 .tab-button {
+  align-items: center;
   background: #f5f8fb;
   border: 1px solid #d7dee6;
   border-radius: 7px;
   color: #30475e;
+  display: inline-flex;
   font-weight: 700;
+  gap: 6px;
   min-height: 34px;
   padding: 6px 12px;
 }
@@ -756,6 +773,108 @@ textarea:disabled {
   min-height: 0;
   overflow: auto;
   padding: 12px;
+}
+
+.database-panel {
+  display: grid;
+  gap: 12px;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.database-title {
+  margin-bottom: 0;
+}
+
+.database-panel .status-message {
+  margin: 0;
+}
+
+.database-empty {
+  min-height: 240px;
+}
+
+.database-sections {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.database-section {
+  background: #f8fafc;
+  border: 1px solid #d7dee6;
+  border-radius: 8px;
+  min-width: 0;
+  padding: 12px;
+}
+
+.database-section h3 {
+  color: #18324a;
+  font-size: 13px;
+  margin: 0 0 10px;
+}
+
+.database-muted {
+  color: #637384;
+  font-size: 13px;
+  margin: 0;
+}
+
+.database-table-wrap {
+  overflow-x: auto;
+}
+
+.database-table {
+  border-collapse: collapse;
+  font-size: 12px;
+  min-width: 100%;
+  table-layout: fixed;
+}
+
+.database-table th,
+.database-table td {
+  border-bottom: 1px solid #d7dee6;
+  max-width: 220px;
+  overflow-wrap: anywhere;
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.database-table th {
+  color: #637384;
+  font-weight: 800;
+}
+
+.database-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.database-kv {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+}
+
+.database-kv div {
+  min-width: 0;
+}
+
+.database-kv dt {
+  color: #637384;
+  font-size: 12px;
+  font-weight: 800;
+  margin-bottom: 3px;
+}
+
+.database-kv dd {
+  font-size: 13px;
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .status-message {

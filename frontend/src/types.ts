@@ -49,6 +49,14 @@ export type CustomerCandidate = {
   orders: string;
 };
 
+export type CustomerSnapshot = {
+  customer: Record<string, unknown> | null;
+  orders: Array<Record<string, unknown>>;
+  complaints: Array<Record<string, unknown>>;
+  memories: Array<Record<string, unknown>>;
+  issue_patterns: Record<string, unknown>;
+};
+
 export type MessageRecord = {
   id: string;
   role: "user" | "assistant" | "error";

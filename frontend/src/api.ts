@@ -1,4 +1,4 @@
-import type { ChatRequest, ChatResponse, ChatStreamEvent } from "./types";
+import type { ChatRequest, ChatResponse, ChatStreamEvent, CustomerSnapshot } from "./types";
 
 async function parseJsonResponse<T>(response: Response): Promise<T> {
   const text = await response.text();
@@ -75,6 +75,11 @@ export async function resetDemoData(): Promise<void> {
     method: "POST",
   });
   await parseJsonResponse<{ status: string }>(response);
+}
+
+export async function fetchCustomerSnapshot(customerId: number): Promise<CustomerSnapshot> {
+  const response = await fetch(`/api/demo/customers/${customerId}/snapshot`);
+  return parseJsonResponse<CustomerSnapshot>(response);
 }
 
 function parseSseEvent(text: string): ChatStreamEvent | null {

@@ -11,10 +11,11 @@ from fastapi.responses import StreamingResponse
 
 from customer_service_agent.config import PROJECT_ROOT, get_settings
 from customer_service_agent.models import ChatRequest, ChatResponse
-from customer_service_agent.service import build_agent
+from customer_service_agent.service import build_agent, build_repository
 
 app = FastAPI(title="Customer Service Agent", version="0.1.0")
 agent = build_agent()
+repository = build_repository()
 
 
 @app.get("/health")
@@ -56,9 +57,7 @@ def chat_stream(payload: ChatRequest) -> StreamingResponse:
 
 @app.post("/demo/reset")
 def reset_demo() -> dict[str, str]:
-    settings = get_settings()
-    if settings.app_env != "development":
-        raise HTTPException(status_code=403, detail="Demo reset is only available in development.")
+    _require_development()
 
     script_path = PROJECT_ROOT / "frontend" / "dev" / "reset_demo_data.py"
     try:
@@ -76,6 +75,18 @@ def reset_demo() -> dict[str, str]:
         raise HTTPException(status_code=500, detail=detail) from exc
 
     return {"status": "reset"}
+
+
+@app.get("/demo/customers/{customer_id}/snapshot")
+def customer_snapshot(customer_id: int) -> dict[str, Any]:
+    _require_development()
+    return repository.customer_snapshot(customer_id)
+
+
+def _require_development() -> None:
+    settings = get_settings()
+    if settings.app_env != "development":
+        raise HTTPException(status_code=403, detail="Demo endpoints are only available in development.")
 
 
 def _sse_event(event: str, data: Any) -> str:

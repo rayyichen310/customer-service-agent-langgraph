@@ -16,11 +16,12 @@ import {
 } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
-import { checkHealth, resetDemoData, streamChat } from "./api";
+import { checkHealth, fetchCustomerSnapshot, resetDemoData, streamChat } from "./api";
 import type {
   ApiStatus,
   ChatResponse,
   CustomerCandidate,
+  CustomerSnapshot,
   MessageRecord,
   StreamNodeEvent,
 } from "./types";
@@ -53,8 +54,8 @@ const PROMPTS_BY_CUSTOMER: Record<number, string[]> = {
     "Show my profile",
     "Refund order 7890 if delivered",
     "Cancel it",
-    "What issues have I had before?",
     "Remember I prefer refunds",
+    "What issues have I had before?",
     "My order is late again",
     "Refund order 0000",
   ],
@@ -152,6 +153,10 @@ function App() {
   const [mobileTab, setMobileTab] = useState<"chat" | "inspector">("chat");
   const [liveNodeTrace, setLiveNodeTrace] = useState<StreamNodeEvent[]>([]);
   const [isLivePlaybackActive, setIsLivePlaybackActive] = useState(false);
+  const [inspectorTab, setInspectorTab] = useState<"flow" | "database">("flow");
+  const [customerSnapshot, setCustomerSnapshot] = useState<CustomerSnapshot | null>(null);
+  const [isSnapshotLoading, setIsSnapshotLoading] = useState(false);
+  const [snapshotError, setSnapshotError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -202,6 +207,20 @@ function App() {
 
   const activeCustomer = CUSTOMER_CANDIDATES.find((customer) => customer.id === activeCustomerId);
 
+  async function refreshCustomerSnapshot(customerId: number) {
+    setIsSnapshotLoading(true);
+    setSnapshotError(null);
+    try {
+      const snapshot = await fetchCustomerSnapshot(customerId);
+      setCustomerSnapshot(snapshot);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Database snapshot failed";
+      setSnapshotError(message);
+    } finally {
+      setIsSnapshotLoading(false);
+    }
+  }
+
   function startThread(customerId: number) {
     setActiveCustomerId(customerId);
     setThreadId(createId("thread"));
@@ -212,6 +231,10 @@ function App() {
     setInput("");
     setNotice(null);
     setMobileTab("chat");
+    setInspectorTab("flow");
+    setCustomerSnapshot(null);
+    setSnapshotError(null);
+    void refreshCustomerSnapshot(customerId);
   }
 
   function exitThread() {
@@ -223,6 +246,9 @@ function App() {
     setIsLivePlaybackActive(false);
     setInput("");
     setMobileTab("chat");
+    setInspectorTab("flow");
+    setCustomerSnapshot(null);
+    setSnapshotError(null);
   }
 
   async function handleSend(event: FormEvent<HTMLFormElement>) {
@@ -345,6 +371,7 @@ function App() {
       setMobileTab("chat");
       streamCompleted = true;
       finishLivePlaybackIfReady();
+      void refreshCustomerSnapshot(activeCustomerId);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Chat request failed";
       setMessages((current) => [
@@ -531,7 +558,17 @@ function App() {
               : "inspector-panel"
           }
         >
-          <Inspector nodeTrace={inspectorState.nodeTrace} payload={inspectorState.payload} />
+          <InspectorShell
+            activeTab={inspectorTab}
+            customerId={activeCustomerId}
+            isSnapshotLoading={isSnapshotLoading}
+            nodeTrace={inspectorState.nodeTrace}
+            onRefreshSnapshot={() => refreshCustomerSnapshot(activeCustomerId)}
+            onTabChange={setInspectorTab}
+            payload={inspectorState.payload}
+            snapshot={customerSnapshot}
+            snapshotError={snapshotError}
+          />
         </div>
       </section>
 
@@ -664,6 +701,194 @@ function MessageList({
 function DecisionChip({ payload }: { payload: ChatResponse }) {
   const decision = String(payload.verification_decision.decision ?? "response");
   return <small className={`decision-chip ${decision}`}>{decision}</small>;
+}
+
+function InspectorShell({
+  activeTab,
+  customerId,
+  isSnapshotLoading,
+  nodeTrace,
+  onRefreshSnapshot,
+  onTabChange,
+  payload,
+  snapshot,
+  snapshotError,
+}: {
+  activeTab: "flow" | "database";
+  customerId: number;
+  isSnapshotLoading: boolean;
+  nodeTrace: StreamNodeEvent[];
+  onRefreshSnapshot: () => void;
+  onTabChange: (tab: "flow" | "database") => void;
+  payload: ChatResponse | null;
+  snapshot: CustomerSnapshot | null;
+  snapshotError: string | null;
+}) {
+  return (
+    <div className="inspector-shell">
+      <div className="inspector-tabs" role="tablist" aria-label="Inspector views">
+        <button
+          className={activeTab === "flow" ? "tab-button active" : "tab-button"}
+          onClick={() => onTabChange("flow")}
+          type="button"
+        >
+          <GitBranch size={14} />
+          Flow
+        </button>
+        <button
+          className={activeTab === "database" ? "tab-button active" : "tab-button"}
+          onClick={() => onTabChange("database")}
+          type="button"
+        >
+          <Database size={14} />
+          Database
+        </button>
+      </div>
+
+      {activeTab === "flow" ? (
+        <Inspector nodeTrace={nodeTrace} payload={payload} />
+      ) : (
+        <DatabasePanel
+          customerId={customerId}
+          isLoading={isSnapshotLoading}
+          onRefresh={onRefreshSnapshot}
+          snapshot={snapshot}
+          snapshotError={snapshotError}
+        />
+      )}
+    </div>
+  );
+}
+
+function DatabasePanel({
+  customerId,
+  isLoading,
+  onRefresh,
+  snapshot,
+  snapshotError,
+}: {
+  customerId: number;
+  isLoading: boolean;
+  onRefresh: () => void;
+  snapshot: CustomerSnapshot | null;
+  snapshotError: string | null;
+}) {
+  return (
+    <div className="database-panel">
+      <div className="panel-title database-title">
+        <div>
+          <h2>Customer database</h2>
+          <small>customer_id {customerId}</small>
+        </div>
+        <button className="icon-button" disabled={isLoading} onClick={onRefresh} type="button">
+          {isLoading ? <Loader2 className="spin" size={15} /> : <RefreshCcw size={15} />}
+        </button>
+      </div>
+
+      {snapshotError && <StatusMessage message={snapshotError} tone="error" />}
+
+      {!snapshot && !snapshotError && (
+        <div className="inspector-empty database-empty">
+          {isLoading ? <Loader2 className="spin" size={24} /> : <Database size={26} />}
+          <span>{isLoading ? "Loading customer rows..." : "No database snapshot loaded."}</span>
+        </div>
+      )}
+
+      {snapshot && (
+        <div className="database-sections">
+          <KeyValueSection title="Customer" value={snapshot.customer} />
+          <RecordTable
+            columns={["order_id", "product_name", "status", "order_date", "delivery_date"]}
+            emptyText="No orders for this customer."
+            records={snapshot.orders}
+            title="Orders"
+          />
+          <RecordTable
+            columns={["complaint_id", "order_id", "issue", "status", "created_at"]}
+            emptyText="No complaints for this customer."
+            records={snapshot.complaints}
+            title="Complaints"
+          />
+          <RecordTable
+            columns={["key", "value", "created_at"]}
+            emptyText="No memory rows for this customer."
+            records={snapshot.memories}
+            title="Memory"
+          />
+          <KeyValueSection title="Issue patterns" value={snapshot.issue_patterns} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RecordTable({
+  columns,
+  emptyText,
+  records,
+  title,
+}: {
+  columns: string[];
+  emptyText: string;
+  records: Array<Record<string, unknown>>;
+  title: string;
+}) {
+  return (
+    <section className="database-section">
+      <h3>{title}</h3>
+      {records.length === 0 ? (
+        <p className="database-muted">{emptyText}</p>
+      ) : (
+        <div className="database-table-wrap">
+          <table className="database-table">
+            <thead>
+              <tr>
+                {columns.map((column) => (
+                  <th key={column}>{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {records.map((record, index) => (
+                <tr key={`${title}-${index}`}>
+                  {columns.map((column) => (
+                    <td key={column}>{formatDatabaseValue(record[column])}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function KeyValueSection({
+  title,
+  value,
+}: {
+  title: string;
+  value: Record<string, unknown> | null;
+}) {
+  const entries = Object.entries(value ?? {});
+  return (
+    <section className="database-section">
+      <h3>{title}</h3>
+      {entries.length === 0 ? (
+        <p className="database-muted">No data.</p>
+      ) : (
+        <dl className="database-kv">
+          {entries.map(([key, item]) => (
+            <div key={key}>
+              <dt>{key}</dt>
+              <dd>{formatDatabaseValue(item)}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+    </section>
+  );
 }
 
 function Inspector({
@@ -1021,6 +1246,16 @@ function formatList(value: unknown) {
     return value.length ? value.map((item) => JSON.stringify(item)).join(", ") : "-";
   }
   return "-";
+}
+
+function formatDatabaseValue(value: unknown) {
+  if (value === null || value === undefined || value === "") {
+    return "-";
+  }
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return JSON.stringify(value);
 }
 
 function normalizeTraceSteps(

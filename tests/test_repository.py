@@ -167,3 +167,15 @@ def test_read_memory_and_issue_patterns() -> None:
         "late delivery again": 1,
     }
     assert patterns["repeated_issues"] == {}
+
+
+def test_customer_snapshot_scopes_rows_to_customer() -> None:
+    repository = build_repository()
+
+    snapshot = repository.customer_snapshot(1)
+
+    assert snapshot["customer"]["customer_id"] == 1
+    assert [order["order_id"] for order in snapshot["orders"]] == [12345]
+    assert {complaint["customer_id"] for complaint in snapshot["complaints"]} == {1}
+    assert {memory["customer_id"] for memory in snapshot["memories"]} == {1}
+    assert snapshot["issue_patterns"]["total_complaints"] == 2

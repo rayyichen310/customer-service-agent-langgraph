@@ -178,3 +178,12 @@ class CustomerServiceRepository:
                 issue: count for issue, count in counts.items() if count > 1
             },
         }
+
+    def customer_snapshot(self, customer_id: int) -> dict[str, Any]:
+        return {
+            "customer": self.get_customer(customer_id),
+            "orders": self.list_orders_for_customer(customer_id),
+            "complaints": self.list_complaints(customer_id),
+            "memories": self.read_memories(customer_id),
+            "issue_patterns": self.summarize_issue_patterns(customer_id),
+        }
